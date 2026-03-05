@@ -26,7 +26,7 @@ def from_file(filename: str) -> np.ndarray:
     return tracers
 
 
-def sample_uniform(n: int, mass: float, snap: Snapshot) -> np.ndarray:
+def sample_uniform(n: int, snap: Snapshot) -> np.ndarray:
     # Retrieve simulation domain
     if _MAX_TEMP is not None:
         domain = snap.get_field(('density', 'temperature'))
@@ -38,15 +38,53 @@ def sample_uniform(n: int, mass: float, snap: Snapshot) -> np.ndarray:
     # Weigh by cell size to cover uniform area in 2D independent of refinement
     domain = domain[mask]
     cell_size = domain['size']
-    prob = cell_size/np.sum(cell_size)
-    sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+    #prob = cell_size/np.sum(cell_size)
+    #sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+    # Ensure no more than one tracer per cell
+    if n == len(domain):
+        sample = np.full_like(domain, True)
+    elif n < len(domain):
+        # Weigh by cell size/mass to ensure uniform spatial distribution
+        prob = cell_size/np.sum(cell_size)
+
+        # Compute occupation probability for each cell
+        occupation = n*prob
+        filled = occupation >= 1.
+        num_filled = np.sum(filled)
+        if num_filled > 0:
+            while True: # Adjust distribution
+                prob = cell_size[~filled]/np.sum(cell_size[~filled])
+                occupation[filled] = 1.
+                occupation[~filled] = (n-num_filled)*prob
+                new_filled = occupation >= 1.
+                if np.any(~filled & new_filled):
+                    filled |= new_filled
+                    num_filled = np.sum(filled)
+                else:
+                    break
+
+            sample = np.random.choice(np.where(~filled)[0], size=(n-num_filled), replace=False, p=prob)
+            sample = np.concatenate((np.where(filled)[0], sample))
+        else:
+            sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+    else:
+        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(domain)}')
+
+    # Mass of the sampled region
+    sample_mass = domain[sample]['density']*domain[sample]['volume']
+    sample_total_mass = np.sum(sample_mass)
 
     dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
     tracers = np.zeros(len(sample), dtype=dtypes)
     tracers['x'] = domain[sample]['x']
     tracers['y'] = domain[sample]['y']
     tracers['z'] = domain[sample]['z']
-    tracers['mass'] = mass
+    tracers['mass'] = sample_mass/occupation[sample]
+
+    print('Total sampled mass: ', sample_total_mass)
+    print('Total tracers mass: ', np.sum(tracers['mass']))
+    print('Min tracer mass: ', np.min(tracers['mass']))
+    print('Max tracer mass: ', np.max(tracers['mass']))
 
     return tracers
 

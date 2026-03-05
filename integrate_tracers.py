@@ -210,7 +210,7 @@ def place_tracers() -> None:
         case 'file':
             TRACERS = plc.from_file(cfg.TRACER_FILE)
         case 'uniform':
-            TRACERS = plc.sample_uniform(cfg.NUM_TRACERS, cfg.TRACER_MASS, place_snap)
+            TRACERS = plc.sample_uniform(cfg.NUM_TRACERS, place_snap)
         case 'unbound':
             TRACERS = plc.sample_unbound(cfg.NUM_TRACERS, place_snap, NUC_EOS)
         case _:
