@@ -13,6 +13,7 @@ SNAP_FIELDS_NU = ['lum nue', 'lum anue', 'lum nux', 'lum anux',
 
 
 class SnapshotProxy(ABC):
+    _field_list: List[str]
     _current_time: float
     _dim: int
 
@@ -39,6 +40,13 @@ class SnapshotProxy(ABC):
     @abstractmethod
     def get_field(self, fields: Union[List[str], Tuple[str], str]) -> np.ndarray:
         pass
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._field_list
+
+    @property
+    def field_list(self) -> List[str]:
+        return self._field_list
 
     @property
     def current_time(self) -> float:

@@ -84,6 +84,10 @@ def parse_command_line() -> None:
 
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('-n', '--num-tracers', type=int, default=cfg.NUM_TRACERS, required=False,
+                        help='Number of tracer particles')
+    parser.add_argument('-j', '--jobs', type=int, default=None, required=False,
+                        help='Number worker processes for integration')
     parser.add_argument('--snapshots', type=str, nargs='+', default=cfg.PATH_TO_SNAPSHOTS, required=False,
                         help='Paths to the snapshot files')
     parser.add_argument('--progenitor', type=str, default=cfg.PATH_TO_PROGENITOR, required=False,
@@ -96,6 +100,8 @@ def parse_command_line() -> None:
                         help='Use backward integration instead of forward')
     parser.add_argument('--track-nu', action='store_true', required=False,
                         help='Track neutrino quantities in tracer history')
+    parser.add_argument('--max-temp', type=float, default=cfg.MAX_TEMP, required=False,
+                        help='Maximum temperature at which to stop tracer integration')
     parser.add_argument('--calculate-seeds', action='store_true', required=False,
                         help='Calculate tracer seeds from progenitor composition')
     parser.add_argument('--overwrite', action='store_true', required=False,
@@ -111,19 +117,38 @@ def parse_command_line() -> None:
     cfg.PATH_TO_SNAPSHOTS = args.snapshots
     cfg.PATH_TO_PROGENITOR = args.progenitor
     cfg.PATH_TO_EOS = args.eos
+
     cfg.OUTPUT_DIR = args.output_dir
+
+    cfg.NUM_TRACERS = args.num_tracers
     cfg.INTEGRATE_BACKWARDS = True if args.integrate_backwards else cfg.INTEGRATE_BACKWARDS
     cfg.TRACK_NU = True if args.track_nu else cfg.TRACK_NU
+    cfg.MAX_TEMP = args.max_temp if cfg.INTEGRATE_BACKWARDS else None
     cfg.CALCULATE_SEEDS = True if args.calculate_seeds else cfg.CALCULATE_SEEDS
+
     cfg.LOG_FILE = args.log_file
 
     assert cfg.PATH_TO_SNAPSHOTS, 'Must specify input snapshots'
     assert (cfg.PATH_TO_PROGENITOR and cfg.CALCULATE_SEEDS) or not cfg.CALCULATE_SEEDS, 'Must specify progenitor file for seed calculation'
     assert cfg.OUTPUT_DIR, 'Must specify output directory'
 
-    N_WORKERS = int(os.environ.get('SLURM_CPUS_PER_TASK'))
+    if args.jobs is not None:
+        N_WORKERS = args.jobs
+    else:
+        N_WORKERS = os.environ.get('SLURM_CPUS_PER_TASK')
+        N_WORKERS = int(N_WORKERS) if N_WORKERS is not None else None
+
     if N_WORKERS is None or N_WORKERS < 1:
-        raise RuntimeError(f'Invalid worker count: {N_WORKERS}')
+        if not sys.stdin.isatty():
+            sys.exit('Invalid worker count.')
+
+        answer = input('WARNING: Worker count could not be determined from neither SLURM nor the command line. How many workers? : ')
+        try:
+            N_WORKERS = int(answer)
+            if N_WORKERS < 1:
+                sys.exit('Invalid user input.')
+        except:
+            sys.exit('Invalid user input.')
 
 
 def init() -> None:
@@ -150,7 +175,7 @@ def init() -> None:
         if not sys.stdin.isatty():
             print('Output directory cannot be overwritten (use --overwrite to force)')
             sys.exit('Exiting.')
-        answer = input('WARNING: output directory already exists. Content will be overwritten. Confirm (y/N): ')
+        answer = input('WARNING: output directory already exists. Contents will be overwritten. Confirm (y/N): ')
         if answer.lower() != 'y':
             sys.exit('Exiting.')
     TRACER_DIR = os.path.join(cfg.OUTPUT_DIR, 'tracers')
@@ -225,7 +250,7 @@ def integrate() -> None:
         'init_step': 1e-6,
     }
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS-4) as exe:
+    with ProcessPoolExecutor(max_workers=N_WORKERS) as exe:
         # Get initial tracer state
         desc0 = snap0.get_proxy_descriptor()
 

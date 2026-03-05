@@ -4,7 +4,7 @@ from typing import List, Dict
 import numpy as np
 
 from .progenitor import Progenitor
-from .network import find_isotope, Nucleus
+from ..network import find_isotope, Nucleus
 
 class FLASHProgenitor(Progenitor):
     _data: np.ndarray

@@ -6,7 +6,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from tqdm import tqdm
 
-from .snapshot import SnapshotProxy, Snapshot
+from .snap.snapshot import SnapshotProxy, Snapshot
 from .eos import EosProxy
 
 
@@ -134,7 +134,7 @@ def save_state(
 ) -> np.ndarray:
     dtype = [(var, float) for var in output_vars]
     state = np.zeros((), dtype=dtype)
-    snap_vars = []
+    batch_vars = []
 
     eos = None
     if 'ejected' in output_vars:
@@ -155,9 +155,17 @@ def save_state(
         elif var == 'ejected':
             state[var] = 1 if is_unbound(pos, snap, eos) else 0
         else:
-            snap_vars.append(var)
+            batch_vars.append(var)
 
-    # Remaining variables can be obtained directly by interpolation
+    # Default unavailable variables (if neutrinos are not loaded) to 0
+    snap_vars = []
+    for var in batch_vars:
+        if var in snap:
+            snap_vars.append(var)
+        else:
+            state[var] = 0.0
+
+    # Remaining variables can be batched together
     rem = snap.get_quantity(snap_vars, *pos)
     for i,var in enumerate(snap_vars):
         if var == 'temperature':

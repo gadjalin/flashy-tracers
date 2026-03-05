@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from .network import Nucleus
+from ..network import Nucleus
 
 class Progenitor(ABC):
     _field_list: List[str]

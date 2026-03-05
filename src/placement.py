@@ -2,7 +2,7 @@ from typing import Tuple, List, Dict, Union, Optional
 
 import numpy as np
 
-from .snapshot import Snapshot
+from .snap.snapshot import Snapshot
 from .eos import EosTable
 
 _MAX_DENS = 1e11

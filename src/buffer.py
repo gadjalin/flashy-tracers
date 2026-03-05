@@ -50,7 +50,7 @@ class StateBuffer(object):
         self._output_dir = output_dir
 
         # Overwrite tracer files if exist
-        n_digits = int(np.log10(self._len - 1)) + 1
+        n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in range(self._len)]
         header = [f'{var} [{_UNITS[var]}]' if _UNITS[var] is not None else f'{var}' for var in self._vars]
         header = '# ' + '        '.join(header) + '\n'
@@ -59,11 +59,11 @@ class StateBuffer(object):
             with open(file, 'w') as f:
                 f.write(header)
 
-#        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-#            futures = [pool.submit(init_tracer_file, file, header) for file in tracer_files]
-#            with tqdm(total=len(futures), bar_format=TQDM_FORMAT, file=sys.stdout) as pbar:
-#                for _ in as_completed(futures):
-#                    pbar.update()
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = [pool.submit(init_tracer_file, file, header) for file in tracer_files]
+            with tqdm(total=len(futures), bar_format=TQDM_FORMAT, file=sys.stdout) as pbar:
+                for _ in as_completed(futures):
+                    pbar.update()
 
         self._dtype = [(var, float) for var in state_vars]
         self._states = [np.empty(0, dtype=self._dtype) for _ in range(self._len)]
@@ -76,7 +76,7 @@ class StateBuffer(object):
         return self._len*self._states[0].nbytes
 
     def flush(self) -> None:
-        n_digits = int(np.log10(self._len - 1)) + 1
+        n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in range(len(self._states))]
 
         def append_tracer_file(file: str, data: np.ndarray) -> None:
@@ -94,7 +94,7 @@ class StateBuffer(object):
             self._states[i] = np.empty(0, dtype=self._dtype)
 
     def delete_failed_output(self, index: List[int]) -> None:
-        n_digits = int(np.log10(self._len - 1)) + 1
+        n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in index]
 
         def remove_tracer_file(filename: str) -> None:
@@ -105,7 +105,7 @@ class StateBuffer(object):
             pool.map(remove_tracer_file, tracer_files)
 
     def reverse_output(self) -> None:
-        n_digits = int(np.log10(self._len - 1)) + 1
+        n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in range(self._len)]
         header = [f'{var} [{_UNITS[var]}]' if _UNITS[var] is not None else f'{var}' for var in self._vars]
         header = '        '.join(header)

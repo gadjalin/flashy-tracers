@@ -8,7 +8,7 @@ import h5py
 from scipy.interpolate import RegularGridInterpolator
 
 from .snapshot import Snapshot, SnapshotProxy, SNAP_FIELDS, SNAP_FIELDS_NU
-from .memory import ShmMeta, make_shared
+from ..memory import ShmMeta, make_shared
 
 
 _FIELD_MAP = {
@@ -39,6 +39,7 @@ class FLASHSnapshotProxy(SnapshotProxy):
     _data: Dict[str, np.ndarray]
 
     def __init__(self, desc: Dict[str, Any]):
+        self._field_list = desc['vars']
         self._current_time = desc['current_time']
         self._dim = desc['dim']
 
@@ -367,7 +368,6 @@ class FLASHSnapshotProxy(SnapshotProxy):
 
 
 class FLASHSnapshot(Snapshot):
-    _field_list: List[str]
     _bbox: np.ndarray
     _data: Dict[str, np.ndarray]
 
@@ -929,6 +929,7 @@ class FLASHSnapshot(Snapshot):
         }
 
         self._desc = {
+            'vars': self._field_list,
             'current_time': self._current_time,
             'dim': self._dim,
             'nxb': self._nxb,
