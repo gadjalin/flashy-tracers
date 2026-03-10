@@ -100,27 +100,27 @@ class FLASHSnapshotProxy(SnapshotProxy):
         iz_start = self._ngz
         iz_end = self._nzb + self._ngz if self._ngz > 0 else None
 
-        dtypes = [('x', float), ('y', float), ('z', float), ('size', float), ('volume', float)] + [(field, float) for field in fields]
+        dtypes = [('x', float), ('y', float), ('z', float), ('dx', float), ('dy', float), ('dz', float), ('volume', float)] + [(field, float) for field in fields]
         q = np.zeros(nblk*ncells, dtype=dtypes)
         for n in range(nblk):
             if self._dim == 1:
                 X = self._grid['x'][n,ix_start:ix_end].reshape(1, 1, self._nxb)
                 Y = np.zeros_like(X)
                 Z = np.zeros_like(X)
-                q['size'][n*ncells:(n+1)*ncells] = self._grid['dx'][n]
             elif self._dim == 2:
                 Y, X = np.meshgrid(self._grid['y'][n,iy_start:iy_end], self._grid['x'][n,ix_start:ix_end], indexing='ij')
                 X = X.reshape(1, self._nyb, self._nxb)
                 Y = Y.reshape(1, self._nyb, self._nxb)
                 Z = np.zeros_like(X)
-                q['size'][n*ncells:(n+1)*ncells] = self._grid['dx'][n]*self._grid['dy'][n]
             elif self._dim == 3:
                 Z, Y, X = np.meshgrid(self._grid['z'][n,iz_start:iz_end], self._grid['y'][n,iy_start:iy_end], self._grid['x'][n,ix_start:ix_end], indexing='ij')
-                q['size'][n*ncells:(n+1)*ncells] = self._grid['dx'][n]*self._grid['dy'][n]*self._grid['dz'][n]
 
             q['x'][n*ncells:(n+1)*ncells] = X.ravel()
             q['y'][n*ncells:(n+1)*ncells] = Y.ravel()
             q['z'][n*ncells:(n+1)*ncells] = Z.ravel()
+            q['dx'][n*ncells:(n+1)*ncells] = self._grid['dx'][n]
+            q['dy'][n*ncells:(n+1)*ncells] = self._grid['dy'][n] if self._dim >= 2 else 0.0
+            q['dz'][n*ncells:(n+1)*ncells] = self._grid['dz'][n] if self._dim == 3 else 0.0
             for field in (fields + ['volume']):
                 q[field][n*ncells:(n+1)*ncells] = \
                     self._data[field][n,iz_start:iz_end,iy_start:iy_end,ix_start:ix_end].ravel()

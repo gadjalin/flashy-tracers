@@ -100,8 +100,10 @@ def parse_command_line() -> None:
                         help='Use backward integration instead of forward')
     parser.add_argument('--track-nu', action='store_true', required=False,
                         help='Track neutrino quantities in tracer history')
+    parser.add_argument('--max-dens', type=float, default=cfg.MAX_DENS, required=False,
+                        help='Maximum density where tracers can be placed')
     parser.add_argument('--max-temp', type=float, default=cfg.MAX_TEMP, required=False,
-                        help='Maximum temperature at which to stop tracer integration')
+                        help='Maximum temperature at which to stop tracer backward integration')
     parser.add_argument('--calculate-seeds', action='store_true', required=False,
                         help='Calculate tracer seeds from progenitor composition')
     parser.add_argument('--overwrite', action='store_true', required=False,
@@ -123,6 +125,7 @@ def parse_command_line() -> None:
     cfg.NUM_TRACERS = args.num_tracers
     cfg.INTEGRATE_BACKWARDS = True if args.integrate_backwards else cfg.INTEGRATE_BACKWARDS
     cfg.TRACK_NU = True if args.track_nu else cfg.TRACK_NU
+    cfg.MAX_DENS = args.max_dens
     cfg.MAX_TEMP = args.max_temp if cfg.INTEGRATE_BACKWARDS else None
     cfg.CALCULATE_SEEDS = True if args.calculate_seeds else cfg.CALCULATE_SEEDS
 
@@ -157,10 +160,6 @@ def init() -> None:
 
     print('Initialising...')
     log.init(cfg.LOG_FILE)
-    plc.init(
-        cfg.MAX_DENS,
-        cfg.MAX_TEMP if cfg.INTEGRATE_BACKWARDS else None,
-    )
 
     print('\tParsing snapshots')
     parse_snapshots()
@@ -209,10 +208,14 @@ def place_tracers() -> None:
     match cfg.PLACEMENT_METHOD:
         case 'file':
             TRACERS = plc.from_file(cfg.TRACER_FILE)
-        case 'uniform':
-            TRACERS = plc.sample_uniform(cfg.NUM_TRACERS, place_snap)
+        case 'uniform space':
+            TRACERS = plc.sample_uniform_space(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS)
+        case 'uniform mass':
+            TRACERS = plc.sample_uniform_mass(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS)
         case 'unbound':
-            TRACERS = plc.sample_unbound(cfg.NUM_TRACERS, place_snap, NUC_EOS)
+            TRACERS = plc.sample_unbound(cfg.NUM_TRACERS, place_snap, NUC_EOS, cfg.MAX_DENS, cfg.MAX_TEMP)
+        case 'user':
+            TRACERS = plc.sample_user(cfg.NUM_TRACERS, place_snap, NUC_EOS, cfg.MAX_DENS, cfg.MAX_TEMP)
         case _:
             raise RuntimeError('Invalid tracer placement method: {cfg.PLACEMENT_METHOD}')
 
@@ -241,7 +244,7 @@ def integrate() -> None:
 
     worker_exports = {
         'ProxyCls': cfg.PROXY_CLS,
-        'max_temp': cfg.MAX_TEMP if cfg.INTEGRATE_BACKWARDS else None,
+        'max_temp': cfg.MAX_TEMP,
         'eos_desc': NUC_EOS.get_proxy_descriptor(),
         'output_vars': cfg.OUTPUT_VARS,
         'rtol': cfg.RTOL,

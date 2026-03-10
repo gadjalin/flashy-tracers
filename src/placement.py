@@ -5,17 +5,6 @@ import numpy as np
 from .snap.snapshot import Snapshot
 from .eos import EosTable
 
-_MAX_DENS = 1e11
-_MAX_TEMP = None
-
-
-def init(max_dens: float, max_temp: Optional[float]) -> None:
-    global _MAX_DENS
-    global _MAX_TEMP
-
-    _MAX_DENS = max_dens
-    _MAX_TEMP = max_temp
-
 
 def from_file(filename: str) -> np.ndarray:
     names = ['x', 'y', 'z', 'mass']
@@ -26,20 +15,28 @@ def from_file(filename: str) -> np.ndarray:
     return tracers
 
 
-def sample_uniform(n: int, snap: Snapshot) -> np.ndarray:
+def sample_uniform_space(
+    n: int,
+    snap: Snapshot,
+    max_dens: Optional[float] = None
+) -> np.ndarray:
     # Retrieve simulation domain
-    if _MAX_TEMP is not None:
-        domain = snap.get_field(('density', 'temperature'))
-        mask = (domain['density'] < _MAX_DENS) & (domain['temperature'] < _MAX_TEMP)
-    else:
-        domain = snap.get_field(('density'))
-        mask = domain['density'] < _MAX_DENS
+    domain = snap.get_field(('density', 'temperature'))
+
+    mask = np.ones_like(domain, dtype=bool)
+    if max_dens is not None:
+        mask &= domain['density'] < max_dens
 
     # Weigh by cell size to cover uniform area in 2D independent of refinement
     domain = domain[mask]
-    cell_size = domain['size']
-    #prob = cell_size/np.sum(cell_size)
-    #sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+    cell_size = domain['dx']
+    if snap.dimensionality >= 2:
+        cell_size *= domain['dy']
+    if snap.dimensionality == 3:
+        cell_size *= domain['dz']
+
+    print(f'Sampling {n} tracers uniformly in space')
+
     # Ensure no more than one tracer per cell
     if n == len(domain):
         sample = np.full_like(domain, True)
@@ -89,7 +86,58 @@ def sample_uniform(n: int, snap: Snapshot) -> np.ndarray:
     return tracers
 
 
-def sample_unbound(n: int, snap: Snapshot, eos: EosTable) -> np.ndarray:
+def sample_uniform_mass(
+    n: int,
+    snap: Snapshot,
+    max_dens: Optional[float] = None
+) -> np.ndarray:
+    # Retrieve simulation domain
+    domain = snap.get_field(('density', 'temperature'))
+
+    mask = np.ones_like(domain, dtype=bool)
+    if max_dens is not None:
+        mask &= domain['density'] < max_dens
+
+    domain = domain[mask]
+    cell_mass = domain['density']*domain['volume']
+    print(f'Sampling {n} tracers of uniform mass in {np.sum(cell_mass):.4e} [g]')
+
+    prob = cell_mass/np.sum(cell_mass)
+    # Allow placing multiple tracers in the same cell
+    # Otherwise we would need to limit the tracer mass (and number) to the
+    # heaviest cell
+    sample = np.random.choice(len(domain), size=n, replace=True, p=prob)
+
+    # Jitter particles away from cell centre, in particular those placed in the
+    # same cell
+    rng = np.random.default_rng(seed=42)
+    x_jitter = rng.uniform(-domain[sample]['dx']/2., domain[sample]['dx']/2., size=len(sample))
+    y_jitter = rng.uniform(-domain[sample]['dy']/2., domain[sample]['dy']/2., size=len(sample))
+    z_jitter = rng.uniform(-domain[sample]['dz']/2., domain[sample]['dz']/2., size=len(sample))
+
+    sample_total_mass = np.sum(domain[sample]['density']*domain[sample]['volume'])
+
+    dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
+    tracers = np.zeros(len(sample), dtype=dtypes)
+    tracers['x'] = domain[sample]['x'] + x_jitter
+    tracers['y'] = domain[sample]['y'] + y_jitter
+    tracers['z'] = domain[sample]['z'] + z_jitter
+    tracers['mass'] = np.sum(cell_mass)/n
+
+    print('Total sampled mass: ', sample_total_mass)
+    print('Sample tracer mass: ', tracers['mass'][0])
+    print('Total tracers mass: ', np.sum(tracers['mass']))
+
+    return tracers
+
+
+def sample_unbound(
+    n: int,
+    snap: Snapshot,
+    eos: EosTable,
+    max_dens: Optional[float] = None,
+    max_temp: Optional[float] = None
+) -> np.ndarray:
     # Retrieve simulation domain
     domain = snap.get_field((
         'density', 'temperature', 'electron fraction',
@@ -97,9 +145,11 @@ def sample_unbound(n: int, snap: Snapshot, eos: EosTable) -> np.ndarray:
         'velocity-x', 'velocity-y', 'velocity-z'
     ))
 
-    mask = domain['density'] < _MAX_DENS
-    if _MAX_TEMP is not None:
-        mask &= domain['temperature'] < _MAX_TEMP
+    mask = np.ones_like(domain, dtype=bool)
+    if max_dens is not None:
+        mask &= domain['density'] < max_dens
+    if max_temp is not None:
+        mask &= domain['temperature'] < max_temp
     mask &= _unbound_mask(domain, eos)
 
     # Weigh by cell size to cover uniform area in 2D independent of refinement
@@ -108,7 +158,11 @@ def sample_unbound(n: int, snap: Snapshot, eos: EosTable) -> np.ndarray:
     print(f'Sampling {n} tracers in the unbound region ({len(domain)} cells)')
 
     cell_mass = domain['density']*domain['volume']
-    cell_size = domain['size']
+    cell_size = domain['dx']
+    if snap.dimensionality >= 2:
+        cell_size *= domain['dy']
+    if snap.dimensionality == 3:
+        cell_size *= domain['dz']
 
     print('Total unbound mass: ', np.sum(cell_mass))
 
@@ -160,6 +214,16 @@ def sample_unbound(n: int, snap: Snapshot, eos: EosTable) -> np.ndarray:
     print('Max tracer mass: ', np.max(tracers['mass']))
 
     return tracers
+
+
+def sample_user(
+    n: int,
+    snap: Snapshot,
+    eos: EosTable,
+    max_dens: Optional[float],
+    max_temp: Optional[float]
+) -> np.ndarray:
+    raise NotImplementedError('User placement method not implemented')
 
 
 def _unbound_mask(cells: np.ndarray, eos: EosTable) -> np.ndarray:
