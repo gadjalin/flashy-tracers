@@ -79,6 +79,6 @@ set in `config.py`.
 
 ## Performances
 
-The integration of 10,000 tracers over 1,500 FLASH snapshots takes about 3hrs on 32
+The integration of 20,000 tracers over 1,500 FLASH snapshots takes about 4hrs on 32
 cores.
 
