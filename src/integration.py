@@ -1,6 +1,7 @@
 from typing import Dict, List, Tuple, Type, Any, Optional
 import sys
 import queue
+import time
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -40,6 +41,8 @@ def worker_process(
         end_pos, state = integrate_tracer(start_proxy, end_proxy, start_pos, exports)
     except Exception as e:
         print('An error occured: ', e)
+        end_pos = None
+        state = None
         sys.stdout.flush()
     finally:
         start_proxy.close()
@@ -76,10 +79,16 @@ def integrate_tracer(
     start_pos: np.ndarray,
     exports: Dict[str, Any]
 ) -> Tuple[np.ndarray, np.ndarray]:
+    start_time = time.time()
+    timeout = 30.0
+
     t0 = start_snap.current_time
     t1 = end_snap.current_time
 
     def velocity(t: float, pos: List[float]) -> List[float]:
+        if (time.time() - start_time) > timeout:
+            raise RuntimeError('Tracer integration timeout')
+
         v0 = start_snap.get_quantity(('velocity-x', 'velocity-y', 'velocity-z'), *pos)
         v1 = end_snap.get_quantity(('velocity-x', 'velocity-y', 'velocity-z'), *pos)
         # Linearly interpolate velocity
