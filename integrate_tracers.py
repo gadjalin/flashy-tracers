@@ -4,9 +4,11 @@ import sys
 import argparse
 from glob import glob
 
-from concurrent.futures import ProcessPoolExecutor, wait
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import queue
 import threading
+from functools import partial
 
 import numpy as np
 from tqdm import tqdm
@@ -253,20 +255,15 @@ def integrate() -> None:
         'init_step': 1e-6,
     }
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as exe:
+    with ProcessPoolExecutor(max_workers=N_WORKERS, mp_context=mp.get_context('spawn')) as exe:
         # Get initial tracer state
         desc0 = snap0.get_proxy_descriptor()
 
         print('Computing initial tracer states')
-
-        futures = [
-            exe.submit(itg.initial_state_process, desc0, n, pos, worker_exports)
-            for n,pos in enumerate(tracer_pos)
-        ]
-
-        done, _ = wait(futures)
-        for w in done:
-            index, state = w.result()
+        initial_state_process_p = partial(itg.initial_state_process, desc=desc0, exports=worker_exports)
+        active_tracers = [(n, pos) for n,pos in enumerate(tracer_pos) if pos is not None]
+        active_ids, active_pos = zip(*active_tracers)
+        for index, state in exe.map(initial_state_process_p, active_ids, active_pos, chunksize=20):
             if state is None:
                 tracer_pos[index] = None
                 print(f'Tracer {index} failed')
@@ -282,18 +279,13 @@ def integrate() -> None:
 
             log.info(f"Integrating {desc0['current_time']:.4f} - {desc1['current_time']:.4f}")
 
+            # Prepare worker process and retrieve active tracers
+            worker_process_p = partial(itg.worker_process, start_desc=desc0, end_desc=desc1, exports=worker_exports)
+            active_tracers = [(n, pos) for n,pos in enumerate(tracer_pos) if pos is not None]
+            active_ids, active_pos = zip(*active_tracers)
             # Start worker processes
-            futures = [
-                exe.submit(itg.worker_process, desc0, desc1, n, pos, worker_exports)
-                for n,pos in enumerate(tracer_pos) if pos is not None
-            ]
-
-            # Join worker processes
-            done, _ = wait(futures)
-
             # Append tracer integration results and update positions
-            for w in done:
-                index, end_pos, state = w.result()
+            for index,end_pos,state in exe.map(worker_process_p, active_ids, active_pos, chunksize=20):
                 if state is None:
                     tracer_pos[index] = None
                     print(f'Tracer {index} failed')
@@ -316,7 +308,7 @@ def integrate() -> None:
             if snap2 is None:
                 break
 
-            # Close shared memory
+            # Delete previous snapshot
             snap0.close()
 
             # Slide window
@@ -326,17 +318,18 @@ def integrate() -> None:
             # Sometimes IO does not flush on the cluster
             sys.stdout.flush()
 
-    # Close shared memory
+    print('Finishing up')
+    # Clean up shared memory
     snap0.close()
     snap1.close()
-
-    print('Finishing up')
+    # Flush buffer
     state_buffer.flush()
 
     # Reverse order in output files
     if cfg.INTEGRATE_BACKWARDS:
         state_buffer.reverse_output()
 
+    # Rid failed tracers files
     if len(failed_tracers) > 0:
         state_buffer.delete_failed_output(failed_tracers)
 

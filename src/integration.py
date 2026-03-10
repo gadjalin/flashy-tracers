@@ -25,10 +25,10 @@ def loader_thread(filenames: List[str], load_nu: bool, queue: queue.Queue, Snaps
 
 
 def worker_process(
-    start_desc: Dict[str, Any],
-    end_desc: Dict[str, Any],
     identifier: int,
     start_pos: np.ndarray,
+    start_desc: Dict[str, Any],
+    end_desc: Dict[str, Any],
     exports: Dict[str, Any]
 ) -> Tuple[int, np.ndarray, np.ndarray]:
     start_proxy = exports['ProxyCls'](start_desc)
@@ -57,9 +57,9 @@ def worker_process(
 
 
 def initial_state_process(
-    desc: Dict[str, Any],
     identifier: int,
     pos: np.ndarray,
+    desc: Dict[str, Any],
     exports: Dict[str, Any]
 ) -> Tuple[int, np.ndarray]:
     proxy = exports['ProxyCls'](desc)
@@ -80,7 +80,7 @@ def integrate_tracer(
     exports: Dict[str, Any]
 ) -> Tuple[np.ndarray, np.ndarray]:
     start_time = time.time()
-    timeout = 30.0
+    timeout = 20.0
 
     t0 = start_snap.current_time
     t1 = end_snap.current_time
