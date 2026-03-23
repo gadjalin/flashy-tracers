@@ -51,6 +51,7 @@ def worker_process(
     # If reached MAX_TEMP do not integrate this tracer further
     if exports['max_temp'] is not None and state is not None:
         if state['temperature']*1e9 > exports['max_temp']:
+            print(f'Tracer {identifier} reached maximum temperature')
             end_pos = None
 
     return (identifier, end_pos, state)

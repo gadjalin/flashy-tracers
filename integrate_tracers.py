@@ -345,11 +345,13 @@ def calculate_seeds(tracer_pos) -> None:
     header = '    '.join(['A', 'Z', 'X'])
     n_digits = int(np.log10(len(tracer_pos) - 1)) + 1
     with tqdm(total=len(tracer_pos), bar_format=TQDM_FORMAT, file=sys.stdout) as pbar:
-        for i,pos in enumerate(tracer_pos):
-            if pos is None:
+        for i in range(len(TRACERS)):
+            tracer_file = os.path.join(TRACER_DIR, 'tracer' + f'{i}'.zfill(n_digits) + '.dat')
+            if not os.path.exists(tracer_file):
                 pbar.update()
                 continue
-            r = np.sqrt(pos[0]**2 + pos[1]**2 + pos[2]**2)
+            traj = np.genfromtxt(tracer_file, names=cfg.OUTPUT_VARS)
+            r = traj['r'][0]*1e5
             seed_file = os.path.join(SEED_DIR, 'seed' + f'{i}'.zfill(n_digits) + '.dat')
             seed = model.get_seed(r)
             A = np.array([nuc.A for nuc in seed.keys()])

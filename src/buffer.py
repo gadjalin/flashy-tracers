@@ -71,9 +71,8 @@ class StateBuffer(object):
     def append(self, index: int, new_state: np.ndarray) -> None:
         self._states[index] = np.append(self._states[index], new_state)
 
-    # Assuming all entries have the same size at this point
     def sizeof(self) -> int:
-        return self._len*self._states[0].nbytes
+        return np.sum([entry.nbytes for entry in self._states])
 
     def flush(self) -> None:
         n_digits = int(np.log10(max(self._len - 1, 1))) + 1
