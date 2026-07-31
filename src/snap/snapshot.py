@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Tuple, List, Union, Optional
 from abc import ABC, abstractmethod
+from enum import IntEnum
 
 import numpy as np
 
@@ -10,6 +11,27 @@ SNAP_FIELDS = ['density', 'temperature', 'electron fraction', 'entropy',
                'energy', 'gravitational potential']
 SNAP_FIELDS_NU = ['lum nue', 'lum anue', 'lum nux', 'lum anux',
                   'ener nue', 'ener anue', 'ener nux', 'ener anux']
+
+#class FIELD(IntEnum):
+#    DENSITY                 = 0
+#    TEMPERATURE             = 1
+#    ELECTRON_FRACTION       = 2
+#    ENTROPY                 = 3
+#    VELOCITY_X              = 4
+#    VELOCITY_Y              = 5
+#    VELOCITY_Z              = 6
+#    ENERGY                  = 7
+#    GRAVITATIONAL_POTENTIAL = 8
+#    LUM_NUE                 = 9
+#    LUM_ANUE                = 10
+#    LUM_NUX                 = 11
+#    LUM_ANUX                = 12
+#    ENER_NUE                = 13
+#    ENER_ANUE               = 14
+#    ENER_NUX                = 15
+#    ENER_ANUX               = 16
+
+SNAP_FIELD_MAP = {k: v for v,k in enumerate(SNAP_FIELDS + SNAP_FIELDS_NU)}
 
 
 class SnapshotProxy(ABC):

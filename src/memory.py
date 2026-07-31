@@ -20,4 +20,3 @@ def make_shared(arr: np.ndarray):
 
     return shm, ShmMeta(name=shm.name, shape=arr.shape, dtype=arr.dtype)
 
-

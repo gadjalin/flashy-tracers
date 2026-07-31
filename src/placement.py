@@ -21,26 +21,27 @@ def sample_uniform_space(
     max_dens: Optional[float] = None
 ) -> np.ndarray:
     # Retrieve simulation domain
-    domain = snap.get_field(('density', 'temperature'))
+    grid, fields = snap.get_field(('density', 'temperature'))
 
-    mask = np.ones_like(domain, dtype=bool)
+    mask = np.ones_like(fields, dtype=bool)
     if max_dens is not None:
-        mask &= domain['density'] < max_dens
+        mask &= fields['density'] < max_dens
 
     # Weigh by cell size to cover uniform area in 2D independent of refinement
-    domain = domain[mask]
-    cell_size = domain['dx']
+    grid = grid[mask]
+    fields = fields[mask]
+    cell_size = grid['dx']
     if snap.dimensionality >= 2:
-        cell_size *= domain['dy']
+        cell_size *= grid['dy']
     if snap.dimensionality == 3:
-        cell_size *= domain['dz']
+        cell_size *= grid['dz']
 
     print(f'Sampling {n} tracers uniformly in space')
 
     # Ensure no more than one tracer per cell
-    if n == len(domain):
-        sample = np.full_like(domain, True)
-    elif n < len(domain):
+    if n == len(grid):
+        sample = np.full_like(grid, True)
+    elif n < len(grid):
         # Weigh by cell size/mass to ensure uniform spatial distribution
         prob = cell_size/np.sum(cell_size)
 
@@ -63,19 +64,19 @@ def sample_uniform_space(
             sample = np.random.choice(np.where(~filled)[0], size=(n-num_filled), replace=False, p=prob)
             sample = np.concatenate((np.where(filled)[0], sample))
         else:
-            sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+            sample = np.random.choice(len(grid), size=n, replace=False, p=prob)
     else:
-        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(domain)}')
+        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(grid)}')
 
     # Mass of the sampled region
-    sample_mass = domain[sample]['density']*domain[sample]['volume']
+    sample_mass = fields[sample]['density']*grid[sample]['volume']
     sample_total_mass = np.sum(sample_mass)
 
     dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
     tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = domain[sample]['x']
-    tracers['y'] = domain[sample]['y']
-    tracers['z'] = domain[sample]['z']
+    tracers['x'] = grid[sample]['x']
+    tracers['y'] = grid[sample]['y']
+    tracers['z'] = grid[sample]['z']
     tracers['mass'] = sample_mass/occupation[sample]
 
     print('Total sampled mass: ', sample_total_mass)
@@ -92,36 +93,37 @@ def sample_uniform_mass(
     max_dens: Optional[float] = None
 ) -> np.ndarray:
     # Retrieve simulation domain
-    domain = snap.get_field(('density', 'temperature'))
+    grid, fields = snap.get_field(('density', 'temperature'))
 
-    mask = np.ones_like(domain, dtype=bool)
+    mask = np.ones_like(fields, dtype=bool)
     if max_dens is not None:
-        mask &= domain['density'] < max_dens
+        mask &= fields['density'] < max_dens
 
-    domain = domain[mask]
-    cell_mass = domain['density']*domain['volume']
+    grid = grid[mask]
+    fields = fields[mask]
+    cell_mass = fields['density']*grid['volume']
     print(f'Sampling {n} tracers of uniform mass in {np.sum(cell_mass):.4e} [g]')
 
     prob = cell_mass/np.sum(cell_mass)
     # Allow placing multiple tracers in the same cell
     # Otherwise we would need to limit the tracer mass (and number) to the
     # heaviest cell
-    sample = np.random.choice(len(domain), size=n, replace=True, p=prob)
+    sample = np.random.choice(len(grid), size=n, replace=True, p=prob)
 
     # Jitter particles away from cell centre, in particular those placed in the
     # same cell
     rng = np.random.default_rng(seed=42)
-    x_jitter = rng.uniform(-domain[sample]['dx']/2., domain[sample]['dx']/2., size=len(sample))
-    y_jitter = rng.uniform(-domain[sample]['dy']/2., domain[sample]['dy']/2., size=len(sample))
-    z_jitter = rng.uniform(-domain[sample]['dz']/2., domain[sample]['dz']/2., size=len(sample))
+    x_jitter = rng.uniform(-grid[sample]['dx']/2., grid[sample]['dx']/2., size=len(sample))
+    y_jitter = rng.uniform(-grid[sample]['dy']/2., grid[sample]['dy']/2., size=len(sample))
+    z_jitter = rng.uniform(-grid[sample]['dz']/2., grid[sample]['dz']/2., size=len(sample))
 
-    sample_total_mass = np.sum(domain[sample]['density']*domain[sample]['volume'])
+    sample_total_mass = np.sum(fields[sample]['density']*grid[sample]['volume'])
 
     dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
     tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = domain[sample]['x'] + x_jitter
-    tracers['y'] = domain[sample]['y'] + y_jitter
-    tracers['z'] = domain[sample]['z'] + z_jitter
+    tracers['x'] = grid[sample]['x'] + x_jitter
+    tracers['y'] = grid[sample]['y'] + y_jitter
+    tracers['z'] = grid[sample]['z'] + z_jitter
     tracers['mass'] = np.sum(cell_mass)/n
 
     print('Total sampled mass: ', sample_total_mass)
@@ -139,37 +141,38 @@ def sample_unbound(
     max_temp: Optional[float] = None
 ) -> np.ndarray:
     # Retrieve simulation domain
-    domain = snap.get_field((
+    grid, fields = snap.get_field((
         'density', 'temperature', 'electron fraction',
         'energy', 'gravitational potential',
         'velocity-x', 'velocity-y', 'velocity-z'
     ))
 
-    mask = np.ones_like(domain, dtype=bool)
+    mask = np.ones_like(fields, dtype=bool)
     if max_dens is not None:
-        mask &= domain['density'] < max_dens
+        mask &= fields['density'] < max_dens
     if max_temp is not None:
-        mask &= domain['temperature'] < max_temp
-    mask &= _unbound_mask(domain, eos)
+        mask &= fields['temperature'] < max_temp
+    mask &= _unbound_mask(grid, fields, eos)
 
     # Weigh by cell size to cover uniform area in 2D independent of refinement
-    domain = domain[mask]
+    grid = grid[mask]
+    fields = fields[mask]
 
-    print(f'Sampling {n} tracers in the unbound region ({len(domain)} cells)')
+    print(f'Sampling {n} tracers in the unbound region ({len(grid)} cells)')
 
-    cell_mass = domain['density']*domain['volume']
-    cell_size = domain['dx']
+    cell_mass = fields['density']*grid['volume']
+    cell_size = grid['dx']
     if snap.dimensionality >= 2:
-        cell_size *= domain['dy']
+        cell_size *= grid['dy']
     if snap.dimensionality == 3:
-        cell_size *= domain['dz']
+        cell_size *= grid['dz']
 
     print('Total unbound mass: ', np.sum(cell_mass))
 
     # Ensure no more than one tracer per cell
-    if n == len(domain):
-        sample = np.full_like(domain, True)
-    elif n < len(domain):
+    if n == len(grid):
+        sample = np.full_like(grid, True)
+    elif n < len(grid):
         # Weigh by cell size/mass to ensure uniform spatial distribution
         prob = cell_size/np.sum(cell_size)
 
@@ -192,20 +195,20 @@ def sample_unbound(
             sample = np.random.choice(np.where(~filled)[0], size=(n-num_filled), replace=False, p=prob)
             sample = np.concatenate((np.where(filled)[0], sample))
         else:
-            sample = np.random.choice(len(domain), size=n, replace=False, p=prob)
+            sample = np.random.choice(len(grid), size=n, replace=False, p=prob)
     else:
-        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(domain)}')
+        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(grid)}')
 
     # Mass of the sampled region
-    sample_mass = domain[sample]['density']*domain[sample]['volume']
+    sample_mass = fields[sample]['density']*grid[sample]['volume']
     sample_total_mass = np.sum(sample_mass)
 
     # Calculate each tracer mass and coordinates
     dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
     tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = domain[sample]['x']
-    tracers['y'] = domain[sample]['y']
-    tracers['z'] = domain[sample]['z']
+    tracers['x'] = grid[sample]['x']
+    tracers['y'] = grid[sample]['y']
+    tracers['z'] = grid[sample]['z']
     tracers['mass'] = sample_mass/occupation[sample]
 
     print('Total sampled mass: ', sample_total_mass)
@@ -226,18 +229,18 @@ def sample_user(
     raise NotImplementedError('User placement method not implemented')
 
 
-def _unbound_mask(cells: np.ndarray, eos: EosTable) -> np.ndarray:
-    xrho = cells['density']
+def _unbound_mask(grid: np.ndarray, fields: np.ndarray, eos: EosTable) -> np.ndarray:
+    xrho = fields['density']
     xtemp = np.full_like(xrho, eos.minimum_temperature)
-    xye = cells['electron fraction']
+    xye = fields['electron fraction']
 
     coldenergydensity = eos.nuc_eos_zone(xrho, xtemp, xye)['logenergy']
 
-    r = np.sqrt(cells['x']**2 + cells['y']**2 + cells['z']**2)
-    vrad = (cells['x']*cells['velocity-x'] + cells['y']*cells['velocity-y'] + cells['z']*cells['velocity-z']) / r
-    xener = cells['energy']
-    xgpot = cells['gravitational potential']
-    vol = cells['volume']
+    r = np.sqrt(grid['x']**2 + grid['y']**2 + grid['z']**2)
+    vrad = (grid['x']*fields['velocity-x'] + grid['y']*fields['velocity-y'] + grid['z']*fields['velocity-z']) / r
+    xener = fields['energy']
+    xgpot = fields['gravitational potential']
+    vol = grid['volume']
 
     coldenergy = (10**(coldenergydensity) - eos.energy_shift)*xrho*vol
     dener = (xener - eos.energy_shift)*xrho*vol
