@@ -161,11 +161,9 @@ def sample_unbound(
     print(f'Sampling {n} tracers in the unbound region ({len(grid)} cells)')
 
     cell_mass = fields['density']*grid['volume']
-    cell_size = grid['dx']
-    if snap.dimensionality >= 2:
-        cell_size *= grid['dy']
-    if snap.dimensionality == 3:
-        cell_size *= grid['dz']
+    cell_size = grid['dx'].copy()
+    cell_size *= grid['dy'] if snap.dimensionality >= 2 else 1.0
+    cell_size *= grid['dz'] if snap.dimensionality == 3 else 1.0
 
     print('Total unbound mass: ', np.sum(cell_mass))
 
@@ -203,12 +201,19 @@ def sample_unbound(
     sample_mass = fields[sample]['density']*grid[sample]['volume']
     sample_total_mass = np.sum(sample_mass)
 
+    # Jitter particles away from cell centre, in particular those placed in the
+    # same cell
+    rng = np.random.default_rng(seed=42)
+    x_jitter = rng.uniform(-grid[sample]['dx']/2., grid[sample]['dx']/2., size=len(sample))
+    y_jitter = rng.uniform(-grid[sample]['dy']/2., grid[sample]['dy']/2., size=len(sample))
+    z_jitter = rng.uniform(-grid[sample]['dz']/2., grid[sample]['dz']/2., size=len(sample))
+
     # Calculate each tracer mass and coordinates
     dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
     tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = grid[sample]['x']
-    tracers['y'] = grid[sample]['y']
-    tracers['z'] = grid[sample]['z']
+    tracers['x'] = grid[sample]['x'] + x_jitter
+    tracers['y'] = grid[sample]['y'] + y_jitter
+    tracers['z'] = grid[sample]['z'] + z_jitter
     tracers['mass'] = sample_mass/occupation[sample]
 
     print('Total sampled mass: ', sample_total_mass)
