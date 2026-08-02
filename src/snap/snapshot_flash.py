@@ -37,6 +37,9 @@ class FLASHSnapshotProxy(SnapshotProxy):
     _nxb: int
     _nyb: int
     _nzb: int
+    _ngx: int
+    _nyx: int
+    _nzx: int
 
     # Grid data
     _x: np.ndarray
@@ -47,7 +50,6 @@ class FLASHSnapshotProxy(SnapshotProxy):
     _dz: np.ndarray
     _vol: np.ndarray
     _bbox: np.ndarray
-    _levels: np.ndarray
 
     # Physical quantities data
     _unk: np.ndarray
@@ -57,7 +59,6 @@ class FLASHSnapshotProxy(SnapshotProxy):
     _dyb: np.ndarray
     _dzb: np.ndarray
     _hash_map: Dict[Tuple[int, int, int, int], int]
-    _neighbours: List[Dict[Tuple[int, int, int], List[int]]]
 
     # Shared memory
     _shm_handles: List[shared_memory.SharedMemory]
@@ -86,22 +87,16 @@ class FLASHSnapshotProxy(SnapshotProxy):
         self._nxb = desc['nxb']
         self._nyb = desc['nyb']
         self._nzb = desc['nzb']
+        self._ngx = desc['ngx']
+        self._ngy = desc['ngy']
+        self._ngz = desc['ngz']
 
         self._shm_handles = []
         self._hash_map = desc['hash_map']
-        self._neighbours = desc['neighbours']
 
-        self._dxb = np.array([(self._xmax - self._xmin)/(self._nblockx * 2**l) for l in range(0, self._lrefine_max)])
-
-        if self._dim >= 2:
-            self._dyb = np.array([(self._ymax - self._ymin)/(self._nblocky * 2**l) for l in range(0, self._lrefine_max)])
-        else:
-            self._dyb = np.ones(self._lrefine_max)
-
-        if self._dim == 3:
-            self._dzb = np.array([(self._zmax - self._zmin)/(self._nblockz * 2**l) for l in range(0, self._lrefine_max)])
-        else:
-            self._dzb = np.ones(self._lrefine_max)
+        self._dxb = desc['dxb']
+        self._dyb = desc['dyb']
+        self._dzb = desc['dzb']
 
         self._x      = push_shared_memory(desc['grid']['x'])
         self._y      = push_shared_memory(desc['grid']['y'])
@@ -111,7 +106,6 @@ class FLASHSnapshotProxy(SnapshotProxy):
         self._dz     = push_shared_memory(desc['grid']['dz'])
         self._vol    = push_shared_memory(desc['grid']['volume'])
         self._bbox   = push_shared_memory(desc['grid']['bbox'])
-        self._levels = push_shared_memory(desc['grid']['level'])
 
         self._unk = push_shared_memory(desc['fields'])
 
@@ -139,27 +133,27 @@ class FLASHSnapshotProxy(SnapshotProxy):
         if isinstance(fields, str):
             fields = [fields]
 
-        if len(fields) == 0:
-            raise ValueError('Field list must contain at least one field')
+        nblk = self._bbox.shape[0]
+        ncells = self._nzb*self._nyb*self._nxb
 
         ifields = [SNAP_FIELD_MAP[field] for field in fields]
-
-        nblk = len(self._bbox)
-        ncells = self._nzb*self._nyb*self._nxb
+        ixstart, ixend = self._ngx, self._nxb + self._ngx
+        iystart, iyend = self._ngy, self._nyb + self._ngy
+        izstart, izend = self._ngz, self._nzb + self._ngz
 
         grid_dtype = [('x', float), ('y', float), ('z', float), ('dx', float), ('dy', float), ('dz', float), ('volume', float)]
         field_dtype = [(field, float) for field in fields]
         grid = np.empty(nblk*ncells, dtype=grid_dtype)
         unk = np.empty(nblk*ncells, dtype=field_dtype)
-        grid['x'][:] = np.broadcast_to(self._x[:,None,None,:], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
-        grid['y'][:] = np.broadcast_to(self._y[:,None,:,None], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
-        grid['z'][:] = np.broadcast_to(self._z[:,:,None,None], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
+        grid['x'][:] = np.broadcast_to(self._x[:,None,None,ixstart:ixend], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
+        grid['y'][:] = np.broadcast_to(self._y[:,None,iystart:iyend,None], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
+        grid['z'][:] = np.broadcast_to(self._z[:,izstart:izend,None,None], (nblk, self._nzb, self._nyb, self._nxb)).reshape(-1)
         grid['dx'][:] = np.repeat(self._dx[:], ncells)
         grid['dy'][:] = np.repeat(self._dy[:], ncells)
         grid['dz'][:] = np.repeat(self._dz[:], ncells)
-        grid['volume'][:] = self._vol[:,:,:,:].ravel()
+        grid['volume'][:] = self._vol[:,izstart:izend,iystart:iyend,ixstart:iyend].ravel()
         for ifield,field in zip(ifields, fields):
-            unk[field][:] = self._unk[ifield,:,:,:,:].ravel()
+            unk[field][:] = self._unk[ifield,:,izstart:izend,iystart:iyend,ixstart:ixend].ravel()
 
         return grid, unk
 
@@ -188,11 +182,11 @@ class FLASHSnapshotProxy(SnapshotProxy):
         z: Optional[float]
     ) -> Union[float, np.ndarray]:
         blockID = self.find_block(x, y, z)
-        dx = self._dx[blockID]
         xbmin = self._bbox[blockID,0,0]
+        dx = self._dx[blockID]
 
-        ix = int((x - (xbmin + dx*0.5)) // dx)
-        x0 = (xbmin + dx*0.5) + ix*dx
+        ix = self._ngx + int((x - (xbmin + dx*0.5)) // dx)
+        x0 = self._x[blockID,ix]
         x1 = x0 + dx
 
         q = np.empty(len(fields))
@@ -204,11 +198,11 @@ class FLASHSnapshotProxy(SnapshotProxy):
             if y is None:
                 raise ValueError('Y coordinate must be specified in 2D')
 
-            dy = self._dy[blockID]
             ybmin = self._bbox[blockID,1,0]
+            dy = self._dy[blockID]
 
-            iy = int((y - (ybmin + dy*0.5)) // dy)
-            y0 = (ybmin + dy*0.5) + iy*dy
+            iy = self._ngy + int((y - (ybmin + dy*0.5)) // dy)
+            y0 = self._y[blockID,iy]
             y1 = y0 + dy
 
             for i,field in enumerate(fields):
@@ -218,16 +212,16 @@ class FLASHSnapshotProxy(SnapshotProxy):
             if y is None or z is None:
                 raise ValueError('Y and Z coordinates must be specified in 3D')
 
-            dy = self._dy[blockID]
-            dz = self._dz[blockID]
             ybmin = self._bbox[blockID,1,0]
             zbmin = self._bbox[blockID,2,0]
+            dy = self._dy[blockID]
+            dz = self._dz[blockID]
 
             iy = int((y - (ybmin + dy*0.5)) // dy)
             iz = int((z - (zbmin + dz*0.5)) // dz)
-            y0 = (ybmin + dy*0.5) + iy*dy
+            y0 = self._y[blockID, iy]
             y1 = y0 + dy
-            z0 = (zbmin + dz*0.5) + iz*dz
+            z0 = self._z[blockID, iz]
             z1 = z0 + dz
 
             for i,field in enumerate(fields):
@@ -245,17 +239,10 @@ class FLASHSnapshotProxy(SnapshotProxy):
         blockID: int,
         ix0: int, ix1: int
     ) -> List[float]:
-        # Fast array access
-        if ix0 >= 0 and ix1 < self._nxb:
-            return (
-                self._unk[field, blockID, 0, 0, ix0],
-                self._unk[field, blockID, 0, 0, ix1]
-            )
-        else: # Slow AMR query
-            return (
-                self._get_amr_data(field, blockID, ix0),
-                self._get_amr_data(field, blockID, ix1)
-            )
+        return (
+            self._unk[field, blockID, 0, 0, ix0],
+            self._unk[field, blockID, 0, 0, ix1]
+        )
 
     def _stencil_2d(
         self,
@@ -264,24 +251,13 @@ class FLASHSnapshotProxy(SnapshotProxy):
         ix0: int, ix1: int,
         iy0: int, iy1: int
     ) -> List[List[float]]:
-        # Fast array access
-        if (ix0 >= 0 and ix1 < self._nxb) and \
-           (iy0 >= 0 and iy1 < self._nyb):
-            return ((   
-                self._unk[field, blockID, 0, iy0, ix0],
-                self._unk[field, blockID, 0, iy1, ix0]
-            ), (
-                self._unk[field, blockID, 0, iy0, ix1],
-                self._unk[field, blockID, 0, iy1, ix1]
-            ))
-        else: # Slow AMR query
-            return ((
-                self._get_amr_data(field, blockID, ix0, iy0),
-                self._get_amr_data(field, blockID, ix0, iy1)
-            ), ( 
-                self._get_amr_data(field, blockID, ix1, iy0),
-                self._get_amr_data(field, blockID, ix1, iy1)
-            ))
+        return ((   
+            self._unk[field, blockID, 0, iy0, ix0],
+            self._unk[field, blockID, 0, iy1, ix0]
+        ), (
+            self._unk[field, blockID, 0, iy0, ix1],
+            self._unk[field, blockID, 0, iy1, ix1]
+        ))
 
     def _stencil_3d(
         self,
@@ -291,157 +267,19 @@ class FLASHSnapshotProxy(SnapshotProxy):
         iy0: int, iy1: int,
         iz0: int, iz1: int
     ) -> List[List[List[float]]]:
-        # Fast array access
-        if (ix0 >= 0 and ix1 < self._nxb) and \
-           (iy0 >= 0 and iy1 < self._nyb) and \
-           (iz0 >= 0 and iz1 < self._nzb):
-            return (((
-                self._unk[field, blockID, iz0, iy0, ix0],
-                self._unk[field, blockID, iz1, iy0, ix0]
-            ), (
-                self._unk[field, blockID, iz0, iy1, ix0],
-                self._unk[field, blockID, iz1, iy1, ix0]
-            )), ((
-                self._unk[field, blockID, iz0, iy0, ix1],
-                self._unk[field, blockID, iz1, iy0, ix1]
-            ), (
-                self._unk[field, blockID, iz0, iy1, ix1],
-                self._unk[field, blockID, iz1, iy1, ix1]
-            )))
-        else: # Slow AMR query
-            return (((
-                self._get_amr_data(field, blockID, ix0, iy0, iz0),
-                self._get_amr_data(field, blockID, ix0, iy0, iz1)
-            ), (
-                self._get_amr_data(field, blockID, ix0, iy1, iz0),
-                self._get_amr_data(field, blockID, ix0, iy1, iz1)
-            )), ((
-                self._get_amr_data(field, blockID, ix1, iy0, iz0),
-                self._get_amr_data(field, blockID, ix1, iy0, iz1)
-            ), (
-                self._get_amr_data(field, blockID, ix1, iy1, iz0),
-                self._get_amr_data(field, blockID, ix1, iy1, iz1)
-            )))
-
-    # TODO vectorise field variable
-    def _get_amr_data(
-        self,
-        field: int,
-        blockID: int,
-        ix: int,
-        iy: int = 0,
-        iz: int = 0
-    ) -> float:
-        # Cell is within block
-        if (0 <= ix and ix < self._nxb) and \
-           (0 <= iy and iy < self._nyb) and \
-           (0 <= iz and iz < self._nzb):
-            return self._unk[field, blockID, iz, iy, ix]
-
-        # Compute neighbour offset
-        x_offset = ix // self._nxb
-        y_offset = iy // self._nyb
-        z_offset = iz // self._nzb
-        offset = (x_offset, y_offset, z_offset)
-        offset_count = self._count_offset(offset)
-
-        # Cell requires neighbour data
-        # FIXME diagonal neighbours (in corners) may be 2 refinement level difference
-        neighbours = self._neighbours[blockID][offset]
-        if len(neighbours) >= 1:
-            if all(self._levels[i] == self._levels[blockID] for i in neighbours): # Single neighbour, same level of refinement
-                return self._unk[field, neighbours[0], iz % self._nzb, iy % self._nyb, ix % self._nxb]
-            elif all(self._levels[i] > self._levels[blockID] for i in neighbours): # 1 (1D), 1/2 (2D), 1/2/8 (3D) neighbours, finer
-                return self._amr_restrict(field, offset, blockID, ix, iy, iz)
-            elif all(self._levels[i] < self._levels[blockID] for i in neighbours): # 1 neighbour, coarser
-                return self._amr_prolong(field, offset, blockID, ix, iy, iz)
-        else:
-            return self._amr_reflect(field, offset, blockID, ix, iy, iz) # Domain boundary, no neighbours -> reflect
-
-    def _amr_reflect(
-        self,
-        field: int,
-        offset: Tuple[int, int, int],
-        blockID: int,
-        ix: int,
-        iy: int,
-        iz: int
-    ) -> float:
-        # Calculate corresponding reflected index
-        def reflect_index(i, n):
-            i = i % (2*n)
-            return i if i < n else 2*n - 1 - i
-
-        # Get basis offsets for this edge (2D/3D), to find common neighbours
-        # i.e. offsets correponding to face neighbours adjacent to this edge neighbour
-        def edgetofaces(edge):
-            if edge[0] == 0:
-                return ((0, edge[1], 0), (0, 0, edge[2]))
-            elif edge[1] == 0:
-                return ((edge[0], 0, 0), (0, 0, edge[2]))
-            elif edge[2] == 0:
-                return ((edge[0], 0, 0), (0, edge[1], 0))
-
-        # Get basis offsets for this corner (3D), to find common neighbours
-        # i.e. offset corresponding to edge neighbours adjacent to this corner neighbour
-        def cornertoedges(corner):
-            return (
-                (corner[0], corner[1], 0),
-                (corner[0], 0, corner[2]),
-                (0, corner[1], corner[2]),
-            )
-
-        offset_count = self._count_offset(offset)
-        if offset_count == 1: # face offset -> reflect a face
-            ix = reflect_index(ix, self._nxb) if offset[0] != 0 else ix
-            iy = reflect_index(iy, self._nyb) if offset[1] != 0 else iy
-            iz = reflect_index(iz, self._nzb) if offset[2] != 0 else iz
-            return self._unk[field, blockID, iz, iy, ix]
-        elif offset_count == 2: # edge offset -> reflect an edge
-            axes = [axis for axis,face in enumerate(offset) if face != 0]
-            faces = edgetofaces(offset)
-            # Find face neighbour corresponding to this edge location
-            # Or extrapolate current block if no neighbour (i.e. at an edge of the domain)
-            if len(self._neighbours[blockID][faces[0]]) != 0:
-                ix = reflect_index(ix, self._nxb) if axes[1] == 0 else ix
-                iy = reflect_index(iy, self._nyb) if axes[1] == 1 else iy
-                iz = reflect_index(iz, self._nzb) if axes[1] == 2 else iz
-                return self._get_amr_data(field, blockID, ix, iy, iz)
-            elif len(self._neighbours[blockID][faces[1]]) != 0:
-                ix = reflect_index(ix, self._nxb) if axes[0] == 0 else ix
-                iy = reflect_index(iy, self._nyb) if axes[0] == 1 else iy
-                iz = reflect_index(iz, self._nzb) if axes[0] == 2 else iz
-                return self._get_amr_data(field, blockID, ix, iy, iz)
-            else:
-                ix = reflect_index(ix, self._nxb) if offset[0] != 0 else ix
-                iy = reflect_index(iy, self._nyb) if offset[1] != 0 else iy
-                iz = reflect_index(iz, self._nzb) if offset[2] != 0 else iz
-                return self._unk[field, blockID, iz, iy, ix]
-        elif offset_count == 3: # reflect a corner
-            edges = cornertoedges(offset)
-            not_axes = [axis for edge in edges for axis,face in edge if face == 0]
-            # Find edge neighbours adjacent to this corner
-            # Or extrapolate if no neighbour (i.e. in corner o the domain)
-            if len(self._neighbours[blockID][edges[0]]) != 0:
-                ix = reflect_index(ix, self._nxb) if not_axes[0] == 0 else ix
-                iy = reflect_index(iy, self._nyb) if not_axes[0] == 1 else iy
-                iz = reflect_index(iz, self._nzb) if not_axes[0] == 2 else iz
-                return self._get_amr_data(field, blockID, ix, iy, iz)
-            elif len(self._neighbours[blockID][edges[1]]) != 0:
-                ix = reflect_index(ix, self._nxb) if not_axes[1] == 0 else ix
-                iy = reflect_index(iy, self._nyb) if not_axes[1] == 1 else iy
-                iz = reflect_index(iz, self._nzb) if not_axes[1] == 2 else iz
-                return self._get_amr_data(field, blockID, ix, iy, iz)
-            elif len(self._neighbours[blockID][edges[2]]) != 0:
-                ix = reflect_index(ix, self._nxb) if not_axes[2] == 0 else ix
-                iy = reflect_index(iy, self._nyb) if not_axes[2] == 1 else iy
-                iz = reflect_index(iz, self._nzb) if not_axes[2] == 2 else iz
-                return self._get_amr_data(field, blockID, ix, iy, iz)
-            else:
-                ix = reflect_index(ix, self._nxb)
-                iy = reflect_index(iy, self._nyb)
-                iz = reflect_index(iz, self._nzb)
-                return self._unk[field, blockID, iz, iy, ix]
+        return (((
+            self._unk[field, blockID, iz0, iy0, ix0],
+            self._unk[field, blockID, iz1, iy0, ix0]
+        ), (
+            self._unk[field, blockID, iz0, iy1, ix0],
+            self._unk[field, blockID, iz1, iy1, ix0]
+        )), ((
+            self._unk[field, blockID, iz0, iy0, ix1],
+            self._unk[field, blockID, iz1, iy0, ix1]
+        ), (
+            self._unk[field, blockID, iz0, iy1, ix1],
+            self._unk[field, blockID, iz1, iy1, ix1]
+        )))
 
     def _amr_restrict(
         self,
@@ -505,56 +343,56 @@ class FLASHSnapshotProxy(SnapshotProxy):
                 self._unk[field, neighbourID, iz0+1, iy0+1, ix0+1]
             )
 
-    # This is a little less accurate but works 100%
-    # TODO improve by interpolating fine cells with coarse cells
-    def _amr_prolong(
-        self,
-        field: int,
-        offset: Tuple[int, int, int],
-        blockID: int,
-        ix: int,
-        iy: int,
-        iz: int
-    ) -> float:
-        neighbourID = self._neighbours[blockID][offset][0]
-        xbmin = self._bbox[blockID,0,0]
-        xnmin = self._bbox[neighbourID,0,0]
-        dx = self._dx[blockID]
-        dxn = self._dx[neighbourID]
-        x = (xbmin + dx*0.5) + ix*dx
-        ixn0 = int((x - (xnmin + dxn*0.5)) // dxn)
-
-        if self._dim >= 2:
-            ybmin = self._bbox[blockID,1,0]
-            ynmin = self._bbox[neighbourID,1,0]
-            dy = self._dy[blockID]
-            dyn = self._dy[neighbourID]
-            y = (ybmin + dy*0.5) + iy*dy
-            iyn0 = int((y - (ynmin + dyn*0.5)) // dyn)
-
-        if self._dim == 3:
-            zbmin = self._bbox[blockID,2,0]
-            znmin = self._bbox[neighbourID,2,0]
-            dz = self._dz[blockID]
-            dzn = self._dz[neighbourID]
-            z = (zbmin + dz*0.5) + iz*dz
-            izn0 = int((z - (znmin + dzn*0.5)) // dzn)
-
-        if self._dim == 1:
-            x0 = (xnmin + dxn*0.5) + ixn0*dxn
-            f = self._stencil_1d(field, neighbourID, ixn0, ixn0+1)
-            return interp1d(x, x0, x0+dxn, f)
-        elif self._dim == 2:
-            x0 = (xnmin + dxn*0.5) + ixn0*dxn
-            y0 = (ynmin + dyn*0.5) + iyn0*dyn
-            f = self._stencil_2d(field, neighbourID, ixn0, ixn0+1, iyn0, iyn0+1)
-            return interp2d(x, y, x0, x0+dxn, y0, y0+dyn, f)
-        elif self._dim == 3:
-            x0 = (xnmin + dxn*0.5) + ixn0*dxn
-            y0 = (ynmin + dyn*0.5) + iyn0*dyn
-            z0 = (znmin + dzn*0.5) + izn0*dzn
-            f = self._stencil_3d(field, neighbourID, ixn0, ixn0+1, iyn0, iyn0+1, izn0, izn0+1)
-            return interp3d(x, y, z, x0, x0+dxn, y0, y0+dyn, z0, z0+dzn, f)
+#    # This is a little less accurate but works 100%
+#    # TODO improve by interpolating fine cells with coarse cells
+#    def _amr_prolong(
+#        self,
+#        field: int,
+#        offset: Tuple[int, int, int],
+#        blockID: int,
+#        ix: int,
+#        iy: int,
+#        iz: int
+#    ) -> float:
+#        neighbourID = self._neighbours[blockID][offset][0]
+#        xbmin = self._bbox[blockID,0,0]
+#        xnmin = self._bbox[neighbourID,0,0]
+#        dx = self._dx[blockID]
+#        dxn = self._dx[neighbourID]
+#        x = (xbmin + dx*0.5) + ix*dx
+#        ixn0 = int((x - (xnmin + dxn*0.5)) // dxn)
+#
+#        if self._dim >= 2:
+#            ybmin = self._bbox[blockID,1,0]
+#            ynmin = self._bbox[neighbourID,1,0]
+#            dy = self._dy[blockID]
+#            dyn = self._dy[neighbourID]
+#            y = (ybmin + dy*0.5) + iy*dy
+#            iyn0 = int((y - (ynmin + dyn*0.5)) // dyn)
+#
+#        if self._dim == 3:
+#            zbmin = self._bbox[blockID,2,0]
+#            znmin = self._bbox[neighbourID,2,0]
+#            dz = self._dz[blockID]
+#            dzn = self._dz[neighbourID]
+#            z = (zbmin + dz*0.5) + iz*dz
+#            izn0 = int((z - (znmin + dzn*0.5)) // dzn)
+#
+#        if self._dim == 1:
+#            x0 = (xnmin + dxn*0.5) + ixn0*dxn
+#            f = self._stencil_1d(field, neighbourID, ixn0, ixn0+1)
+#            return interp1d(x, x0, x0+dxn, f)
+#        elif self._dim == 2:
+#            x0 = (xnmin + dxn*0.5) + ixn0*dxn
+#            y0 = (ynmin + dyn*0.5) + iyn0*dyn
+#            f = self._stencil_2d(field, neighbourID, ixn0, ixn0+1, iyn0, iyn0+1)
+#            return interp2d(x, y, x0, x0+dxn, y0, y0+dyn, f)
+#        elif self._dim == 3:
+#            x0 = (xnmin + dxn*0.5) + ixn0*dxn
+#            y0 = (ynmin + dyn*0.5) + iyn0*dyn
+#            z0 = (znmin + dzn*0.5) + izn0*dzn
+#            f = self._stencil_3d(field, neighbourID, ixn0, ixn0+1, iyn0, iyn0+1, izn0, izn0+1)
+#            return interp3d(x, y, z, x0, x0+dxn, y0, y0+dyn, z0, z0+dzn, f)
 
 #    def _amr_prolong1d(
 #        self,
@@ -699,6 +537,12 @@ class FLASHSnapshot(Snapshot):
     _nxb: int
     _nyb: int
     _nzb: int
+    _ngx: int
+    _nyx: int
+    _nzx: int
+    _dxb: np.ndarray
+    _dyb: np.ndarray
+    _dzb: np.ndarray
 
     _x: np.ndarray
     _y: np.ndarray
@@ -721,11 +565,12 @@ class FLASHSnapshot(Snapshot):
     _shm_grid: Dict[str, ShmMeta]
     _shm_fields: ShmMeta
 
-    def __init__(self, filename: str, use_nu: Optional[bool] = False):
+    def __init__(self, filename: str, use_nu: bool = False, nguard: int = 1):
         self._field_list = (SNAP_FIELDS + SNAP_FIELDS_NU) if use_nu else SNAP_FIELDS
 
-        self._read_data(filename, use_nu)
+        self._read_data(filename, use_nu, nguard)
         self._find_neighbours()
+        self._fill_gcs()
 
         self._setup_shm()
 
@@ -748,7 +593,7 @@ class FLASHSnapshot(Snapshot):
     def get_field(self, fields: Sequence[str]) -> np.ndarray:
         return self._proxy.get_field(fields)
 
-    def _read_data(self, filename: str, use_nu: bool) -> None:
+    def _read_data(self, filename: str, use_nu: bool, nguard: int) -> None:
         with h5py.File(filename, 'r') as f:
             # Decode datasets
             integer_scalars = {k.decode('ascii').strip(): v for k,v in f['integer scalars'][()]}
@@ -764,34 +609,34 @@ class FLASHSnapshot(Snapshot):
             self._nxb = integer_scalars['nxb']
             self._nyb = integer_scalars['nyb']
             self._nzb = integer_scalars['nzb']
+            self._ngx = nguard
+            self._ngy = nguard if self._dim >= 2 else 0
+            self._ngz = nguard if self._dim == 3 else 0
 
             # Domain boundaries
-            if self._dim == 1: # 1D spherical symmetry
-                self._xmin = real_runtime_parameters['xmin']
-                self._xmax = real_runtime_parameters['xmax']
-                self._ymin = 0
-                self._ymax = np.pi
-                self._zmin = 0
-                self._zmax = 2.*np.pi
-            if self._dim == 2: # 2D Axisymmetry (cylindrical)
-                self._xmin = real_runtime_parameters['xmin']
-                self._xmax = real_runtime_parameters['xmax']
-                self._ymin = real_runtime_parameters['ymin']
-                self._ymax = real_runtime_parameters['ymax']
-                self._zmin = 0
-                self._zmax = 2.*np.pi
-            if self._dim == 3: # Full 3D / Octant
-                self._xmin = real_runtime_parameters['xmin']
-                self._xmax = real_runtime_parameters['xmax']
-                self._ymin = real_runtime_parameters['ymin']
-                self._ymax = real_runtime_parameters['ymax']
-                self._zmin = real_runtime_parameters['zmin']
-                self._zmax = real_runtime_parameters['zmax']
+            self._xmin = real_runtime_parameters['xmin']
+            self._xmax = real_runtime_parameters['xmax']
+            self._ymin = real_runtime_parameters['ymin'] if self._dim >= 2 else 0
+            self._ymax = real_runtime_parameters['ymax'] if self._dim >= 2 else np.pi
+            self._zmin = real_runtime_parameters['zmin'] if self._dim == 3 else 0
+            self._zmax = real_runtime_parameters['zmax'] if self._dim == 3 else 2.*np.pi
 
             self._lrefine_max = integer_runtime_parameters['lrefine_max']
             self._nblockx = integer_runtime_parameters['nblockx']
             self._nblocky = integer_runtime_parameters['nblocky']
             self._nblockz = integer_runtime_parameters['nblockz']
+
+            self._dxb = np.array([(self._xmax - self._xmin)/(self._nblockx * 2**l) for l in range(0, self._lrefine_max)])
+
+            if self._dim >= 2:
+                self._dyb = np.array([(self._ymax - self._ymin)/(self._nblocky * 2**l) for l in range(0, self._lrefine_max)])
+            else:
+                self._dyb = np.ones(self._lrefine_max)
+
+            if self._dim == 3:
+                self._dzb = np.array([(self._zmax - self._zmin)/(self._nblockz * 2**l) for l in range(0, self._lrefine_max)])
+            else:
+                self._dzb = np.ones(self._lrefine_max)
 
             # Keep quantities only from leaf blocks
             node_type = f['node type'][()]
@@ -802,108 +647,89 @@ class FLASHSnapshot(Snapshot):
 
             # Calculate cell-centred coordinates
             nblk = self._bbox.shape[0]
-            self._x = np.empty((nblk, self._nxb))
-            self._y = np.empty((nblk, self._nyb))
-            self._z = np.empty((nblk, self._nzb))
-            self._dx = np.empty(nblk)
-            self._dy = np.empty(nblk)
-            self._dz = np.empty(nblk)
-            self._vol = np.empty((nblk, self._nzb, self._nyb, self._nxb))
-            for n in range(nblk):
-                xbmin = self._bbox[n, 0, 0]
-                xbmax = self._bbox[n, 0, 1]
+            nxGC = self._nxb + 2*self._ngx
+            nyGC = self._nyb + 2*self._ngy
+            nzGC = self._nzb + 2*self._ngz
+            ixstart = self._ngx
+            ixend   = self._nxb + self._ngx
+            iystart = self._ngy
+            iyend   = self._nyb + self._ngy
+            izstart = self._ngz
+            izend   = self._nzb + self._ngz
 
-                if self._dim >= 2:
-                    ybmin = self._bbox[n, 1, 0]
-                    ybmax = self._bbox[n, 1, 1]
-                else:
-                    ybmin = 0
-                    ybmax = np.pi
+            xbmin = self._bbox[:, 0, 0]
+            xbmax = self._bbox[:, 0, 1]
+            self._dx = np.abs(xbmax - xbmin) / self._nxb
+            self._x = xbmin[:, None] + (np.arange(nxGC) + 0.5 - self._ngx)*self._dx[:, None]
 
-                if self._dim == 3:
-                    zbmin = self._bbox[n, 2, 0]
-                    zbmax = self._bbox[n, 2, 1]
-                else:
-                    zbmin = 0
-                    zbmax = 2.*np.pi
+            if self._dim >= 2:
+                ybmin = self._bbox[:, 1, 0]
+                ybmax = self._bbox[:, 1, 1]
+                self._dy = np.abs(ybmax - ybmin) / self._nyb
+                self._y = ybmin[:, None] + (np.arange(nyGC) + 0.5 - self._ngy)*self._dy[:, None]
+            else:
+                self._dy = np.zeros(nblk)
+                self._y = np.zeros((nblk, nyGC))
 
-                dx = abs(xbmax - xbmin) / self._nxb
-                dy = abs(ybmax - ybmin) / self._nyb
-                dz = abs(zbmax - zbmin) / self._nzb
-
-                self._x[n,:] = xbmin + (np.arange(self._nxb) + 0.5)*dx
-                self._y[n,:] = ybmin + (np.arange(self._nyb) + 0.5)*dy if self._dim >= 2 else 0.0
-                self._z[n,:] = zbmin + (np.arange(self._nzb) + 0.5)*dz if self._dim == 3 else 0.0
-                self._dx[n] = dx
-                self._dy[n] = dy if self._dim >= 2 else 0.0
-                self._dz[n] = dz if self._dim == 3 else 0.0
+            if self._dim == 3:
+                zbmin = self._bbox[:, 2, 0]
+                zbmax = self._bbox[:, 2, 1]
+                self._dz = np.abs(zbmax - zbmin) / self._nzb
+                self._z = zbmin[:, None] + (np.arange(nzGC) + 0.5 - self._ngz)*self._dz[:, None]
+            else:
+                self._dz = np.zeros(nblk)
+                self._z = np.zeros((nblk, nzGC))
 
             # Fill cell volumes
-            for n in range(nblk):
-                if self._dim == 1:
-                    # Spherical shell volume assuming cell-centred radius
-                    vol = (4./3.)*np.pi*((self._x[n,:] + self._dx[n]*0.5)**3 - (self._x[n,:] - self._dx[n]*0.5)**3)
-                    vol = vol.reshape((1, 1, self._nxb))
-                elif self._dim == 2:
-                    # annular volume 2*pi*r_c*dr*dz, where r_c is cell-centred radius
-                    vol = 2.*np.pi*self._x[n,:]*self._dx[n]*self._dy[n]
-                    vol = np.tile(vol[None,:], (self._nyb,1)) # Broadcast to 2D array
-                    vol = vol.reshape((1, self._nyb, self._nxb))
-                elif self._dim == 3:
-                    # Every cell in the block has a volume of dx*dy*dz
-                    vol = np.full((self._nzb, self._nyb, self._nxb), self._dx[n]*self._dy[n]*self._dz[n])
-
-                self._vol[n,:,:,:] = vol
+            if self._dim == 1:
+                # Spherical shell volume assuming cell-centred radius
+                self._vol = (4./3.)*np.pi*((self._x + 0.5*self._dx[:, None])**3 - (self._x - 0.5*self._dx[:, None])**3)
+                self._vol = self._vol.reshape(nblk, 1, 1, nxGC)
+            elif self._dim == 2:
+                # annular volume 2*pi*r_c*dr*dz, where r_c is cell-centred radius
+                self._vol = 2.*np.pi*self._x*self._dx[:, None]*self._dy[:, None]
+                self._vol = np.broadcast_to(self._vol[:, None, None,:], (nblk, 1, nyGC, nxGC))
+            elif self._dim == 3:
+                # Every cell in the block has a volume of dx*dy*dz
+                self._vol = self._dx*self._dy*self._dz
+                self._vol = np.broadcast_to(self._vol[:, None, None, None], (nblk, nzGC, nyGC, nxGC))
 
             # Setup grid quantities
             nfields = len(self._field_list)
-            self._unk = np.empty((nfields, nblk, self._nzb, self._nyb, self._nxb))
+            self._unk = np.empty((nfields, nblk, nzGC, nyGC, nxGC))
             for field in _FLASH_FIELDS:
                 ifield = SNAP_FIELD_MAP[FLASH_FIELD_MAP[field]]
-                self._unk[ifield,:,:,:,:] = f[field][()][leaf_mask]
+                self._unk[ifield,:,izstart:izend,iystart:iyend,ixstart:ixend] = f[field][()][leaf_mask]
 
             # Fill neutrino quantities
             if use_nu:
-                unk = {field: f[field][()][leaf_mask] for field in _FLASH_NU_FIELDS}
-                for n in range(nblk):
-                    if self._dim == 1:
-                        X = self._x[n,:].reshape(1, 1, self._nxb)
-                        Y = np.zeros_like(X)
-                        Z = np.zeros_like(X)
-                    elif self._dim == 2:
-                        Y, X = np.meshgrid(self._y[n,:], self._x[n,:], indexing='ij')
-                        X = X.reshape(1, self._nyb, self._nxb)
-                        Y = Y.reshape(1, self._nyb, self._nxb)
-                        Z = np.zeros_like(X)
-                    elif self._dim == 3:
-                        Z, Y, X = np.meshgrid(self._z[n,:], self._y[n,:], self._x[n,:], indexing='ij')
-                    r = np.sqrt(X**2 + Y**2 + Z**2)
+                X = np.broadcast_to(self._x[:, None, None, ixstart:ixend], (nblk, self._nzb, self._nyb, self._nxb))
+                Y = np.broadcast_to(self._y[:, None, iystart:iyend, None], (nblk, self._nzb, self._nyb, self._nxb))
+                Z = np.broadcast_to(self._z[:, izstart:izend, None, None], (nblk, self._nzb, self._nyb, self._nxb))
+                r = np.sqrt(X**2 + Y**2 + Z**2)
 
-                    self._unk[SNAP_FIELD_MAP['lum nue'  ] ,n,:,:,:] = 4.*np.pi*r**2*unk['fnue'][n]*1e51
-                    self._unk[SNAP_FIELD_MAP['lum anue' ] ,n,:,:,:] = 4.*np.pi*r**2*unk['fnua'][n]*1e51
-                    self._unk[SNAP_FIELD_MAP['lum nux'  ] ,n,:,:,:] = 4.*np.pi*r**2*unk['fnux'][n]*1e51*0.5
-                    self._unk[SNAP_FIELD_MAP['lum anux' ] ,n,:,:,:] = 4.*np.pi*r**2*unk['fnux'][n]*1e51*0.5
-                    self._unk[SNAP_FIELD_MAP['ener nue' ],n,:,:,:] = unk['enue'][n]
-                    self._unk[SNAP_FIELD_MAP['ener anue'],n,:,:,:] = unk['enua'][n]
-                    self._unk[SNAP_FIELD_MAP['ener nux' ],n,:,:,:] = unk['enux'][n]
-                    self._unk[SNAP_FIELD_MAP['ener anux'],n,:,:,:] = unk['enux'][n]
+                self._unk[SNAP_FIELD_MAP['lum nue'  ],:,izstart:izend,iystart:iyend,ixstart:ixend] = 4.*np.pi*r**2*f['fnue'][()][leaf_mask]*1e51
+                self._unk[SNAP_FIELD_MAP['lum anue' ],:,izstart:izend,iystart:iyend,ixstart:ixend] = 4.*np.pi*r**2*f['fnua'][()][leaf_mask]*1e51
+                self._unk[SNAP_FIELD_MAP['lum nux'  ],:,izstart:izend,iystart:iyend,ixstart:ixend] = 4.*np.pi*r**2*f['fnux'][()][leaf_mask]*1e51*0.5
+                self._unk[SNAP_FIELD_MAP['lum anux' ],:,izstart:izend,iystart:iyend,ixstart:ixend] = 4.*np.pi*r**2*f['fnux'][()][leaf_mask]*1e51*0.5
+                self._unk[SNAP_FIELD_MAP['ener nue' ],:,izstart:izend,iystart:iyend,ixstart:ixend] = f['enue'][()][leaf_mask]
+                self._unk[SNAP_FIELD_MAP['ener anue'],:,izstart:izend,iystart:iyend,ixstart:ixend] = f['enua'][()][leaf_mask]
+                self._unk[SNAP_FIELD_MAP['ener nux' ],:,izstart:izend,iystart:iyend,ixstart:ixend] = f['enux'][()][leaf_mask]
+                self._unk[SNAP_FIELD_MAP['ener anux'],:,izstart:izend,iystart:iyend,ixstart:ixend] = f['enux'][()][leaf_mask]
 
-            # Fill lookup hash table
+            # Fill block hash table
             xb = lambda n: (self._bbox[n,0,0] + self._bbox[n,0,1])*0.5
             yb = lambda n: (self._bbox[n,1,0] + self._bbox[n,1,1])*0.5
             zb = lambda n: (self._bbox[n,2,0] + self._bbox[n,2,1])*0.5
-            dxb = lambda l: (self._xmax - self._xmin)/(self._nblockx * 2**(l-1))
-            dyb = lambda l: (self._ymax - self._ymin)/(self._nblocky * 2**(l-1))
-            dzb = lambda l: (self._zmax - self._zmin)/(self._nblockz * 2**(l-1))
 
             self._hash_map = {}
             self._hash = np.empty((nblk, 4))
             for n,l in enumerate(self._levels):
                 block_hash = (
                     l,
-                    int((xb(n) - self._xmin)/dxb(l)),
-                    int((yb(n) - self._ymin)/dyb(l)) if self._dim >= 2 else 0,
-                    int((zb(n) - self._zmin)/dzb(l)) if self._dim == 3 else 0
+                    int((xb(n) - self._xmin)/self._dxb[l-1]),
+                    int((yb(n) - self._ymin)/self._dyb[l-1]) if self._dim >= 2 else 0,
+                    int((zb(n) - self._zmin)/self._dzb[l-1]) if self._dim == 3 else 0
                 )
                 self._hash_map[block_hash] = n
                 self._hash[n] = block_hash
@@ -1022,6 +848,220 @@ class FLASHSnapshot(Snapshot):
                 push_neighbour(n, (-1, +1, +1), np.where(mask_xyz011[n])[0])
                 push_neighbour(n, (+1, +1, +1), np.where(mask_xyz111[n])[0])
 
+    def _fill_gcs(self) -> None:
+        nblk = self._bbox.shape[0]
+
+        # Reflect boundary, copy, and restrict
+        for blockID in range(nblk):
+            for offset,neighbours in self._neighbours[blockID].items():
+                if len(neighbours) == 0:
+                    self._amr_reflect_block(blockID, offset)
+                elif all(self._levels[i] == self._levels[blockID] for i in neighbours):
+                    self._amr_copy_block(blockID, offset, neighbours[0])
+                elif all(self._levels[i] > self._levels[blockID] for i in neighbours):
+                    self._amr_restrict_block(blockID, offset, neighbours)
+
+        # Prolongation after everything else is done
+        # TODO cache blocks needing prolongation in first loop, so we don't
+        # have to loop over everything again
+        for blockID in range(nblk):
+            for offset,neighbours in self._neighbours[blockID].items():
+                if len(neighbours) > 0 and all(self._levels[i] < self._levels[blockID] for i in neighbours):
+                    self._amr_prolong_block(blockID, offset, neighbours[0])
+
+    def _amr_dest_slice(self, offset: int, n: int, ng: int) -> Tuple[int, int]:
+        if offset == 0:
+            return (ng, n + ng)
+        else:
+            istart = 0 if offset < 0 else (n + ng)
+            return (istart, istart + ng)
+
+    def _amr_restrict_slice(self, offset: int, n: int, ng: int, ratio: int) -> Tuple[int, int]:
+        if offset == 0:
+            return (ng, n + ng)
+        else:
+            istart = n - (ratio - 1)*ng if offset < 0 else ng
+            return (istart, istart + ratio*ng)
+
+    def _amr_prolong_slice(self, offset: int, n: int, ng: int, ratio: int, np: int) -> Tuple[int, int]:
+        if offset == 0:
+            return (
+                max(np*(n // ratio), ng - 1 + np*(n // ratio)),
+                min(n + 2*ng, ng + (np + 1)*(n // ratio) + 1)
+            )
+        else:
+            istart = n + ng - (ng//2) - 1 if offset < 0 else ng - 1
+            iend   = n + ng + 1           if offset < 0 else ng + (ng//2) + 1
+            return (istart, iend)
+
+    def _amr_prolonged_slice(self, offset: int, n: int, ng: int) -> Tuple[int, int]:
+        if offset == 0:
+            return (1, -1) if ng > 0 else (0, n)
+        else:
+            istart = 1 - (ng & 1) if offset < 0 else 1
+            return (istart, istart + ng)
+
+    def _amr_reflect_block(
+        self,
+        blockID: int,
+        offset: Tuple[int, int, int]
+    ) -> None:
+        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
+        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
+        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
+        jxstart, jxend = ixstart - (offset[0]*self._ngx), ixend - (offset[0]*self._ngx)
+        jystart, jyend = iystart - (offset[1]*self._ngy), iyend - (offset[1]*self._ngy)
+        jzstart, jzend = izstart - (offset[2]*self._ngz), izend - (offset[2]*self._ngz)
+        xo = -1 if offset[0] else 1
+        yo = -1 if offset[1] else 1
+        zo = -1 if offset[2] else 1
+
+        for ifield in range(len(self._field_list)):
+            self._unk[ifield, blockID, izstart:izend, iystart:iyend, ixstart:ixend] = \
+                    self._unk[ifield, blockID, jzstart:jzend, jystart:jyend, jxstart:jxend][::zo, ::yo, ::xo]
+
+    def _amr_copy_block(
+        self,
+        blockID: int,
+        offset: Tuple[int, int, int],
+        neighbourID: int
+    ) -> None:
+        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
+        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
+        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
+        jxstart, jxend = ixstart - (offset[0]*self._nxb), ixend - (offset[0]*self._nxb)
+        jystart, jyend = iystart - (offset[1]*self._nyb), iyend - (offset[1]*self._nyb)
+        jzstart, jzend = izstart - (offset[2]*self._nzb), izend - (offset[2]*self._nzb)
+
+        for ifield in range(len(self._field_list)):
+            self._unk[ifield, blockID, izstart:izend, iystart:iyend, ixstart:ixend] = \
+                self._unk[ifield, neighbourID, jzstart:jzend, jystart:jyend, jxstart:jxend]
+
+    def _amr_restrict_block(
+        self,
+        blockID: int,
+        offset: Tuple[int, int, int],
+        neighbourIDs: List[int]
+    ) -> None:
+        dl = self._levels[neighbourIDs[0]] - self._levels[blockID]
+        ratio = (1 << dl)
+
+        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
+        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
+        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
+        jxstart, jxend = self._amr_restrict_slice(offset[0], self._nxb, self._ngx, ratio)
+        jystart, jyend = self._amr_restrict_slice(offset[1], self._nyb, self._ngy, ratio)
+        jzstart, jzend = self._amr_restrict_slice(offset[2], self._nzb, self._ngz, ratio)
+        nxp = max(1, self._nxb // ratio) if offset[0] == 0 else self._ngx
+        nyp = max(1, self._nyb // ratio) if offset[1] == 0 else self._ngy
+        nzp = max(1, self._nzb // ratio) if offset[2] == 0 else self._ngz
+        npx = ratio if offset[0] == 0 else 1
+        npy = ratio if offset[1] == 0 and self._dim >= 2 else 1
+        npz = ratio if offset[2] == 0 and self._dim == 3 else 1
+
+        if self._dim == 1:
+            mean_shape = (1, 1, self._ngx, ratio)
+            mean_axes = 3
+        elif self._dim == 2:
+            mean_shape = (1,
+                self._nyb//ratio if offset[1] == 0 else self._ngy, ratio,
+                self._nxb//ratio if offset[0] == 0 else self._ngx, ratio
+            )
+            mean_axes = (2,4)
+        elif self._dim == 3:
+            mean_shape = (
+                self._nzb//ratio if offset[2] == 0 else self._ngz, ratio,
+                self._nyb//ratio if offset[1] == 0 else self._ngy, ratio,
+                self._nxb//ratio if offset[0] == 0 else self._ngx, ratio
+            )
+            mean_axes = (1,3,5)
+
+        for i,neighbourID in enumerate(neighbourIDs):
+            ixp = i // (npy*npz)
+            iyp = (i // npz) % npy
+            izp = i % npz
+
+            for ifield in range(len(self._field_list)):
+                self._unk[
+                    ifield,
+                    blockID,
+                    izstart+izp*nzp:izstart+(izp+1)*nzp,
+                    iystart+iyp*nyp:iystart+(iyp+1)*nyp,
+                    ixstart+ixp*nxp:ixstart+(ixp+1)*nxp
+                ] = \
+                self._unk[
+                    ifield,
+                    neighbourID,
+                    jzstart:jzend,
+                    jystart:jyend,
+                    jxstart:jxend
+                ].reshape(mean_shape).mean(axis=mean_axes)
+
+    def _amr_prolong_block(
+        self,
+        blockID: int,
+        offset: Tuple[int, int, int],
+        neighbourID: int
+    ) -> None:
+        dl = self._levels[blockID] - self._levels[neighbourID]
+        ratio = (1 << dl)
+
+        xbmin = self._bbox[blockID, 0, 0]
+        ybmin = self._bbox[blockID, 1, 0]
+        zbmin = self._bbox[blockID, 2, 0]
+        xnmin = self._bbox[neighbourID, 0, 0]
+        ynmin = self._bbox[neighbourID, 1, 0]
+        znmin = self._bbox[neighbourID, 2, 0]
+        dxb = self._dxb[self._levels[blockID]-1]
+        dyb = self._dyb[self._levels[blockID]-1]
+        dzb = self._dzb[self._levels[blockID]-1]
+
+        npx = round(abs(xbmin - xnmin) / dxb)
+        npy = round(abs(ybmin - ynmin) / dyb)
+        npz = round(abs(zbmin - znmin) / dzb)
+
+        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
+        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
+        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
+        jxstart, jxend = self._amr_prolong_slice(offset[0], self._nxb, self._ngx, ratio, npx)
+        jystart, jyend = self._amr_prolong_slice(offset[1], self._nyb, self._ngy, ratio, npy)
+        jzstart, jzend = self._amr_prolong_slice(offset[2], self._nzb, self._ngz, ratio, npz)
+        kxstart, kxend = self._amr_prolonged_slice(offset[0], self._nxb, self._ngx)
+        kystart, kyend = self._amr_prolonged_slice(offset[1], self._nyb, self._ngy)
+        kzstart, kzend = self._amr_prolonged_slice(offset[2], self._nzb, self._ngz)
+
+        for ifield in range(len(self._field_list)):
+            src = self._unk[ifield, neighbourID, jzstart:jzend, jystart:jyend, jxstart:jxend]
+            for _ in range(dl):
+                src = self._amr_prolong_axis(src, axis=2)
+                if self._dim >= 2:
+                    src = self._amr_prolong_axis(src, axis=1)
+                if self._dim == 3:
+                    src = self._amr_prolong_axis(src, axis=0)
+
+            self._unk[ifield, blockID, izstart:izend, iystart:iyend, ixstart:ixend] = \
+                src[kzstart:kzend, kystart:kyend, kxstart:kxend]
+
+    def _amr_prolong_axis(self, src: np.ndarray, axis: int) -> np.ndarray:
+        dst_shape = list(src.shape)
+        dst_shape[axis] = 2*(dst_shape[axis] - 1)
+        dst = np.empty(dst_shape, dtype=src.dtype)
+
+        lo = [slice(None) for _ in range(3)]
+        hi = [slice(None) for _ in range(3)]
+        lo[axis] = slice(None, -1)
+        hi[axis] = slice(1,  None)
+
+        even = [slice(None) for _ in range(3)]
+        odd  = [slice(None) for _ in range(3)]
+        even[axis] = slice(0, None, 2)
+        odd[axis]  = slice(1, None, 2)
+
+        dst[tuple(even)] = 0.75*src[tuple(lo)] + 0.25*src[tuple(hi)]
+        dst[tuple(odd)]  = 0.25*src[tuple(lo)] + 0.75*src[tuple(hi)]
+
+        return dst
+
     def get_proxy_descriptor(self) -> Dict[str, Any]:
         return self._desc
 
@@ -1038,7 +1078,6 @@ class FLASHSnapshot(Snapshot):
             'dz'    : self._to_shared(self._dz),
             'volume': self._to_shared(self._vol),
             'bbox'  : self._to_shared(self._bbox),
-            'level' : self._to_shared(self._levels)
         }
 
         self._shm_fields = self._to_shared(self._unk)
@@ -1060,8 +1099,13 @@ class FLASHSnapshot(Snapshot):
             'nxb'         : self._nxb,
             'nyb'         : self._nyb,
             'nzb'         : self._nzb,
+            'ngx'         : self._ngx,
+            'ngy'         : self._ngy,
+            'ngz'         : self._ngz,
+            'dxb'         : self._dxb,
+            'dyb'         : self._dyb,
+            'dzb'         : self._dzb,
             'hash_map'    : self._hash_map,
-            'neighbours'  : self._neighbours,
             'grid'        : self._shm_grid,
             'fields'      : self._shm_fields
         }
