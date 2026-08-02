@@ -188,7 +188,7 @@ def save_state(
 
 def is_unbound(pos: np.ndarray, snap: SnapshotProxy, eos: EosProxy) -> bool:
     var = [
-        'volume', 'density', 'electron fraction',
+        'density', 'electron fraction',
         'velocity-x', 'velocity-y', 'velocity-z',
         'energy', 'gravitational potential'
     ]
@@ -203,11 +203,10 @@ def is_unbound(pos: np.ndarray, snap: SnapshotProxy, eos: EosProxy) -> bool:
     vrad = (pos[0]*cell[var.index('velocity-x')] + pos[1]*cell[var.index('velocity-y')] + pos[2]*cell[var.index('velocity-z')]) / r
     xener = cell[var.index('energy')]
     xgpot = cell[var.index('gravitational potential')]
-    vol = cell[var.index('volume')]
 
-    coldenergy = (10**(coldenergydensity) - eos.energy_shift)*xrho*vol
-    dener = (xener - eos.energy_shift)*xrho*vol
-    dgrav = xgpot*xrho*vol
+    coldenergy = (10**(coldenergydensity) - eos.energy_shift)*xrho
+    dener = (xener - eos.energy_shift)*xrho
+    dgrav = xgpot*xrho
     detot = dener + dgrav - coldenergy
     return (detot > 0.0) & (vrad > 0.0)
 
