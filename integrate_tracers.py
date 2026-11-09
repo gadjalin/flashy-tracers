@@ -105,7 +105,9 @@ def parse_command_line() -> None:
     parser.add_argument('--max-dens', type=float, default=cfg.MAX_DENS, required=False,
                         help='Maximum density where tracers can be placed')
     parser.add_argument('--max-temp', type=float, default=cfg.MAX_TEMP, required=False,
-                        help='Maximum temperature at which to stop tracer backward integration')
+                        help='Maximum temperature at which to stop tracer integration if backward integration is used.')
+    parser.add_argument('--max-rad', type=float, default=cfg.MAX_RAD, required=False,
+                        help='Maximum radius up to which tracers can be placed. Does not apply to unbound placement method.')
     parser.add_argument('--calculate-seeds', action='store_true', required=False,
                         help='Calculate tracer seeds from progenitor composition')
     parser.add_argument('--overwrite', action='store_true', required=False,
@@ -129,6 +131,7 @@ def parse_command_line() -> None:
     cfg.TRACK_NU = True if args.track_nu else cfg.TRACK_NU
     cfg.MAX_DENS = args.max_dens
     cfg.MAX_TEMP = args.max_temp if cfg.INTEGRATE_BACKWARDS else None
+    cfg.MAX_RAD  = args.max_rad
     cfg.CALCULATE_SEEDS = True if args.calculate_seeds else cfg.CALCULATE_SEEDS
 
     cfg.LOG_FILE = args.log_file
@@ -211,17 +214,17 @@ def place_tracers() -> None:
         case 'file':
             TRACERS = plc.from_file(cfg.TRACER_FILE)
         case 'uniform space':
-            TRACERS = plc.sample_uniform_space(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS)
+            TRACERS = plc.sample_uniform_space(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS, cfg.MAX_RAD)
         case 'uniform mass':
-            TRACERS = plc.sample_uniform_mass(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS)
+            TRACERS = plc.sample_uniform_mass(cfg.NUM_TRACERS, place_snap, cfg.MAX_DENS, cfg.MAX_RAD)
         case 'unbound':
             TRACERS = plc.sample_unbound(cfg.NUM_TRACERS, place_snap, NUC_EOS, cfg.MAX_DENS, cfg.MAX_TEMP)
         case 'user':
-            TRACERS = plc.sample_user(cfg.NUM_TRACERS, place_snap, NUC_EOS, cfg.MAX_DENS, cfg.MAX_TEMP)
+            TRACERS = plc.sample_user(cfg.NUM_TRACERS, place_snap, NUC_EOS, cfg.MAX_DENS, cfg.MAX_TEMP, cfg.MAX_RAD)
         case _:
             raise RuntimeError('Invalid tracer placement method: {cfg.PLACEMENT_METHOD}')
 
-    np.savetxt(os.path.join(cfg.OUTPUT_DIR, 'tracers.dat'), TRACERS, fmt='%1.18e', header='x [cm]\ty [cm]\tz [cm]\t mass [g]')
+    plc.save_tracers(os.path.join(cfg.OUTPUT_DIR, 'tracers.dat'), TRACERS)
 
 
 def integrate() -> None:
@@ -230,11 +233,12 @@ def integrate() -> None:
     print('Creating tracer buffer')
     state_buffer = StateBuffer(len(TRACERS), cfg.OUTPUT_VARS, TRACER_DIR)
     snap_queue = queue.Queue(maxsize=2)
+    stop_loader = threading.Event()
 
     print('Starting integration')
     loader = threading.Thread(
         target=itg.loader_thread,
-        args=(SNAPSHOT_FILES, cfg.TRACK_NU, snap_queue, cfg.SNAP_CLS),
+        args=(SNAPSHOT_FILES, cfg.TRACK_NU, snap_queue, cfg.SNAP_CLS, stop_loader),
         daemon=True
     )
     loader.start()
@@ -253,6 +257,7 @@ def integrate() -> None:
         'atol': cfg.ATOL,
         'max_step': cfg.MAXSTEP,
         'init_step': 1e-6,
+        'timeout': cfg.TRACER_TIMEOUT,
     }
 
     with ProcessPoolExecutor(max_workers=N_WORKERS, mp_context=mp.get_context('spawn')) as exe:
@@ -262,6 +267,8 @@ def integrate() -> None:
         print('Computing initial tracer states')
         initial_state_process_p = partial(itg.initial_state_process, desc=desc0, exports=worker_exports)
         active_tracers = [(n, pos) for n,pos in enumerate(tracer_pos) if pos is not None]
+        if len(active_tracers) == 0:
+            raise RuntimeError('No tracers to integrate')
         active_ids, active_pos = zip(*active_tracers)
         for index, state in exe.map(initial_state_process_p, active_ids, active_pos, chunksize=20):
             if state is None:
@@ -273,6 +280,7 @@ def integrate() -> None:
             state_buffer.append(index, state)
 
         # Integrate next states
+        loader_done = False
         while True:
             desc0 = snap0.get_proxy_descriptor()
             desc1 = snap1.get_proxy_descriptor()
@@ -282,6 +290,10 @@ def integrate() -> None:
             # Prepare worker process and retrieve active tracers
             worker_process_p = partial(itg.worker_process, start_desc=desc0, end_desc=desc1, exports=worker_exports)
             active_tracers = [(n, pos) for n,pos in enumerate(tracer_pos) if pos is not None]
+            if len(active_tracers) == 0:
+                print('No active tracers left, stopping integration')
+                log.info(f"No active tracers left at {desc0['current_time']:.4f}, stopping integration")
+                break
             active_ids, active_pos = zip(*active_tracers)
             # Start worker processes
             # Append tracer integration results and update positions
@@ -306,6 +318,7 @@ def integrate() -> None:
 
             # Check sentinel
             if snap2 is None:
+                loader_done = True
                 break
 
             # Delete previous snapshot
@@ -322,6 +335,15 @@ def integrate() -> None:
     # Clean up shared memory
     snap0.close()
     snap1.close()
+
+    # Clear queue if stopped early
+    stop_loader.set()
+    if not loader_done:
+        snap = snap_queue.get()
+        while snap is not None:
+            snap.close()
+            snap = snap_queue.get()
+    loader.join()
     # Flush buffer
     state_buffer.flush()
 
@@ -342,7 +364,7 @@ def integrate() -> None:
 def calculate_seeds(tracer_pos) -> None:
     model = cfg.MODEL_CLS(cfg.PATH_TO_PROGENITOR)
 
-    header = '    '.join(['A', 'Z', 'X'])
+    header = 'A   Z   X'
     n_digits = int(np.log10(len(tracer_pos) - 1)) + 1
     with tqdm(total=len(tracer_pos), bar_format=TQDM_FORMAT, file=sys.stdout) as pbar:
         for i in range(len(TRACERS)):
@@ -350,14 +372,14 @@ def calculate_seeds(tracer_pos) -> None:
             if not os.path.exists(tracer_file):
                 pbar.update()
                 continue
-            traj = np.genfromtxt(tracer_file, names=cfg.OUTPUT_VARS)
+            traj = np.atleast_1d(np.genfromtxt(tracer_file, names=cfg.OUTPUT_VARS))
             r = traj['r'][0]*1e5
             seed_file = os.path.join(SEED_DIR, 'seed' + f'{i}'.zfill(n_digits) + '.dat')
             seed = model.get_seed(r)
             A = np.array([nuc.A for nuc in seed.keys()])
             Z = np.array([nuc.Z for nuc in seed.keys()])
             X = np.array([X for X in seed.values()])
-            np.savetxt(seed_file, np.column_stack((A, Z, X)), fmt='%d\t%d\t%.6e', header=header)
+            np.savetxt(seed_file, np.column_stack((A, Z, X)), fmt=(' %-3d', '%-3d', '%.6e'), header=header)
             pbar.update()
 
 

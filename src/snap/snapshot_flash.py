@@ -3,6 +3,7 @@ from typing import Tuple, Sequence, List, Dict, Union, Optional, Any
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from math import floor
+import itertools
 
 import numpy as np
 import h5py
@@ -72,6 +73,7 @@ class FLASHSnapshotProxy(SnapshotProxy):
         self._field_list = desc['field_list']
         self._current_time = desc['current_time']
         self._dim = desc['dim']
+        self._geometry = desc['geometry']
 
         self._xmin = desc['xmin']
         self._xmax = desc['xmax']
@@ -151,7 +153,7 @@ class FLASHSnapshotProxy(SnapshotProxy):
         grid['dx'][:] = np.repeat(self._dx[:], ncells)
         grid['dy'][:] = np.repeat(self._dy[:], ncells)
         grid['dz'][:] = np.repeat(self._dz[:], ncells)
-        grid['volume'][:] = self._vol[:,izstart:izend,iystart:iyend,ixstart:iyend].ravel()
+        grid['volume'][:] = self._vol[:,izstart:izend,iystart:iyend,ixstart:ixend].ravel()
         for ifield,field in zip(ifields, fields):
             unk[field][:] = self._unk[ifield,:,izstart:izend,iystart:iyend,ixstart:ixend].ravel()
 
@@ -163,16 +165,19 @@ class FLASHSnapshotProxy(SnapshotProxy):
         y: Optional[float] = None,
         z: Optional[float] = None
     ) -> int:
+        if (self._dim >= 2 and y is None) or (self._dim == 3 and z is None):
+            raise ValueError(f'Invalid coordinates for {self._dim}D block lookup: x = {x}, y = {y}, z = {z}')
+
         for level in range(self._lrefine_max, 0, -1):
             ix = int((x - self._xmin)//self._dxb[level-1])
-            iy = int((y - self._ymin)//self._dyb[level-1]) if y is not None else 0
-            iz = int((z - self._zmin)//self._dzb[level-1]) if z is not None else 0
+            iy = int((y - self._ymin)//self._dyb[level-1]) if self._dim >= 2 else 0
+            iz = int((z - self._zmin)//self._dzb[level-1]) if self._dim == 3 else 0
 
             key = (level, ix, iy, iz)
             if key in self._hash_map:
                 return self._hash_map[key]
         else:
-            raise RuntimeError(f'No block found at ({x:.5f}, {y if y is not None else np.nan:.5f}, {z if z is not None else np.nan:.5f})')
+            raise RuntimeError(f'No block found at ({x:.5e}, {y if y is not None else np.nan:.5e}, {z if z is not None else np.nan:.5e})')
 
     def _interp_block(
         self,
@@ -217,8 +222,8 @@ class FLASHSnapshotProxy(SnapshotProxy):
             dy = self._dy[blockID]
             dz = self._dz[blockID]
 
-            iy = int((y - (ybmin + dy*0.5)) // dy)
-            iz = int((z - (zbmin + dz*0.5)) // dz)
+            iy = self._ngy + int((y - (ybmin + dy*0.5)) // dy)
+            iz = self._ngz + int((z - (zbmin + dz*0.5)) // dz)
             y0 = self._y[blockID, iy]
             y1 = y0 + dy
             z0 = self._z[blockID, iz]
@@ -317,7 +322,7 @@ class FLASHSnapshot(Snapshot):
     _hash: List[Tuple[int, int, int, int]]
 
     _hash_map: Dict[Tuple[int, int, int, int], int]
-    _neighbours: List[Dict[Tuple[int, int, int], List[int]]]
+    _neighbours: List[Dict[Tuple[int, int, int], Tuple[str, List[int]]]]
     _unk: np.ndarray
 
     _desc: Dict[str, Any]
@@ -361,6 +366,16 @@ class FLASHSnapshot(Snapshot):
             real_scalars = {k.decode('ascii').strip(): v for k,v in f['real scalars'][()]}
             real_runtime_parameters = {k.decode('ascii').strip(): v for k,v in f['real runtime parameters'][()]}
             integer_runtime_parameters = {k.decode('ascii').strip(): v for k,v in f['integer runtime parameters'][()]}
+            string_runtime_parameters = {
+                k.decode('ascii').strip(): v.decode('ascii').strip()
+                for k,v in f['string runtime parameters'][()]
+            } if 'string runtime parameters' in f else {}
+
+            self._geometry = string_runtime_parameters['geometry'].lower()
+            self._bc = [
+                [string_runtime_parameters[f'{ax}{side}_boundary_type'].lower() for side in ('l', 'r')]
+                for ax in ('x', 'y', 'z')
+            ]
 
             # Read data
             self._dim = integer_scalars['dimensionality']
@@ -457,7 +472,7 @@ class FLASHSnapshot(Snapshot):
 
             # Setup grid quantities
             nfields = len(self._field_list)
-            self._unk = np.empty((nfields, nblk, nzGC, nyGC, nxGC))
+            self._unk = np.full((nfields, nblk, nzGC, nyGC, nxGC), np.nan)
             for field in _FLASH_FIELDS:
                 ifield = SNAP_FIELD_MAP[FLASH_FIELD_MAP[field]]
                 self._unk[ifield,:,izstart:izend,iystart:iyend,ixstart:ixend] = f[field][()][leaf_mask]
@@ -484,8 +499,9 @@ class FLASHSnapshot(Snapshot):
             zb = lambda n: (self._bbox[n,2,0] + self._bbox[n,2,1])*0.5
 
             self._hash_map = {}
-            self._hash = np.empty((nblk, 4))
+            self._hash = np.empty((nblk, 4), dtype=np.int64)
             for n,l in enumerate(self._levels):
+                l = int(l)
                 block_hash = (
                     l,
                     int((xb(n) - self._xmin)/self._dxb[l-1]),
@@ -496,139 +512,78 @@ class FLASHSnapshot(Snapshot):
                 self._hash[n] = block_hash
 
     def _find_neighbours(self) -> None:
-        xbmin = self._bbox[:,0,0]
-        xbmax = self._bbox[:,0,1]
-        ybmin = self._bbox[:,1,0]
-        ybmax = self._bbox[:,1,1]
-        zbmin = self._bbox[:,2,0]
-        zbmax = self._bbox[:,2,1]
-
-        xi_lo = xbmin[:,None]
-        yi_lo = ybmin[:,None]
-        zi_lo = zbmin[:,None]
-        xi_hi = xbmax[:,None]
-        yi_hi = ybmax[:,None]
-        zi_hi = zbmax[:,None]
-
-        xj_lo = xbmin[None,:]
-        yj_lo = ybmin[None,:]
-        zj_lo = zbmin[None,:]
-        xj_hi = xbmax[None,:]
-        yj_hi = ybmax[None,:]
-        zj_hi = zbmax[None,:]
-
-        eps = 1e-10
-        match_x = np.minimum(xi_hi, xj_hi) > np.maximum(xi_lo, xj_lo) + eps # blocks aligned on x-axis
-        match_y = np.minimum(yi_hi, yj_hi) > np.maximum(yi_lo, yj_lo) + eps # blocks aligned on y-axis
-        match_z = np.minimum(zi_hi, zj_hi) > np.maximum(zi_lo, zj_lo) + eps # blocks aligned on z-axis
-
-        mask_xlo = (np.abs(xi_lo - xj_hi) < eps) & match_y & match_z # neighbours on lower x face
-        mask_xhi = (np.abs(xi_hi - xj_lo) < eps) & match_y & match_z # neighbours on upper x face
-
-        if self._dim >= 2:
-            mask_ylo = (np.abs(yi_lo - yj_hi) < eps) & match_x & match_z # neighbours on lower y face
-            mask_yhi = (np.abs(yi_hi - yj_lo) < eps) & match_x & match_z # neighbours on upper y face
-
-            mask_xy00 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_lo - yj_hi) < eps) & match_z # diagonal xlo/ylo
-            mask_xy10 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_lo - yj_hi) < eps) & match_z # diagonal xhi/ylo
-            mask_xy01 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_hi - yj_lo) < eps) & match_z # diagonal xlo/yhi
-            mask_xy11 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_hi - yj_lo) < eps) & match_z # diagonal xhi/yhi
-        if self._dim == 3:
-            mask_zlo = (np.abs(zi_lo - zj_hi) < eps) & match_x & match_y # neighbours on lower z face
-            mask_zhi = (np.abs(zi_hi - zj_lo) < eps) & match_x & match_y # neighbours on upper z face
-
-            mask_xz00 = (np.abs(xi_lo - xj_hi) < eps) & match_y & (np.abs(zi_lo - zj_hi) < eps) # diagonal xlo/zlo
-            mask_xz10 = (np.abs(xi_hi - xj_lo) < eps) & match_y & (np.abs(zi_lo - zj_hi) < eps) # diagonal xhi/zlo
-            mask_xz01 = (np.abs(xi_lo - xj_hi) < eps) & match_y & (np.abs(zi_hi - zj_lo) < eps) # diagonal xlo/zhi
-            mask_xz11 = (np.abs(xi_hi - xj_lo) < eps) & match_y & (np.abs(zi_hi - zj_lo) < eps) # diagonal xhi/zhi
-
-            mask_yz00 = match_x & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_lo - zj_hi) < eps) # diagonal ylo/zlo
-            mask_yz10 = match_x & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_lo - zj_hi) < eps) # diagonal yhi/zlo
-            mask_yz01 = match_x & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_hi - zj_lo) < eps) # diagonal ylo/zhi
-            mask_yz11 = match_x & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_hi - zj_lo) < eps) # diagonal yhi/zhi
-
-            mask_xyz000 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_lo - zj_hi) < eps) # corner xlo/ylo/zlo
-            mask_xyz100 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_lo - zj_hi) < eps) # corner xhi/ylo/zlo
-            mask_xyz010 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_lo - zj_hi) < eps) # corner xlo/yhi/zlo
-            mask_xyz110 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_lo - zj_hi) < eps) # corner xhi/yhi/zlo
-            mask_xyz001 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_hi - zj_lo) < eps) # corner xlo/ylo/zhi
-            mask_xyz101 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_lo - yj_hi) < eps) & (np.abs(zi_hi - zj_lo) < eps) # corner xhi/ylo/zhi
-            mask_xyz011 = (np.abs(xi_lo - xj_hi) < eps) & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_hi - zj_lo) < eps) # corner xlo/yhi/zhi
-            mask_xyz111 = (np.abs(xi_hi - xj_lo) < eps) & (np.abs(yi_hi - yj_lo) < eps) & (np.abs(zi_hi - zj_lo) < eps) # corner xhi/yhi/zhi
-
-        nblk = self._bbox.shape[0]
-        self._neighbours = [{} for n in range(nblk)]
-
-        def push_neighbour(blockID, offset, neighbourIDs):
-            # Sort neighbours by coordinates to easily locate finer neighbours
-            # for restriction
-            neighbourIDs = list(neighbourIDs[np.lexsort((
-                self._hash[neighbourIDs,3],
-                self._hash[neighbourIDs,2],
-                self._hash[neighbourIDs,1],
-            ))])
-            self._neighbours[blockID][offset] = neighbourIDs
-
-        for n in range(nblk):
-            push_neighbour(n, (-1, 0, 0), np.where(mask_xlo[n])[0])
-            push_neighbour(n, (+1, 0, 0), np.where(mask_xhi[n])[0])
-            if self._dim >= 2:
-                # Y Faces
-                push_neighbour(n, (0, -1, 0), np.where(mask_ylo[n])[0])
-                push_neighbour(n, (0, +1, 0), np.where(mask_yhi[n])[0])
-
-                # X-Y Edges
-                push_neighbour(n, (-1, -1, 0), np.where(mask_xy00[n])[0])
-                push_neighbour(n, (+1, -1, 0), np.where(mask_xy10[n])[0])
-                push_neighbour(n, (-1, +1, 0), np.where(mask_xy01[n])[0])
-                push_neighbour(n, (+1, +1, 0), np.where(mask_xy11[n])[0])
-            if self._dim == 3:
-                # Z Faces
-                push_neighbour(n, (0, 0, -1), np.where(mask_zlo[n])[0])
-                push_neighbour(n, (0, 0, +1), np.where(mask_zhi[n])[0])
-
-                # X-Z Edges
-                push_neighbour(n, (-1, 0, -1), np.where(mask_xz00[n])[0])
-                push_neighbour(n, (+1, 0, -1), np.where(mask_xz10[n])[0])
-                push_neighbour(n, (-1, 0, +1), np.where(mask_xz01[n])[0])
-                push_neighbour(n, (+1, 0, +1), np.where(mask_xz11[n])[0])
-
-                # Y-Z Edges
-                push_neighbour(n, (0, -1, -1), np.where(mask_yz00[n])[0])
-                push_neighbour(n, (0, +1, -1), np.where(mask_yz10[n])[0])
-                push_neighbour(n, (0, -1, +1), np.where(mask_yz01[n])[0])
-                push_neighbour(n, (0, +1, +1), np.where(mask_yz11[n])[0])
-
-                # Corners
-                push_neighbour(n, (-1, -1, -1), np.where(mask_xyz000[n])[0])
-                push_neighbour(n, (+1, -1, -1), np.where(mask_xyz100[n])[0])
-                push_neighbour(n, (-1, +1, -1), np.where(mask_xyz010[n])[0])
-                push_neighbour(n, (+1, +1, -1), np.where(mask_xyz110[n])[0])
-                push_neighbour(n, (-1, -1, +1), np.where(mask_xyz001[n])[0])
-                push_neighbour(n, (+1, -1, +1), np.where(mask_xyz101[n])[0])
-                push_neighbour(n, (-1, +1, +1), np.where(mask_xyz011[n])[0])
-                push_neighbour(n, (+1, +1, +1), np.where(mask_xyz111[n])[0])
+        active_dims = [True, self._dim > 1, self._dim == 3]
+        nroot = [self._nblockx, self._nblocky, self._nblockz]
+        offsets = [
+            offset for offset in
+            itertools.product(*[(-1, 0, 1) if active else (0,) for active in active_dims])
+            if any(offset)
+        ]
+        self._neighbours = []
+        for n, row in enumerate(self._hash):
+            l, ix, iy, iz = (int(v) for v in row)
+            nmax = [nb << (l - 1) for nb in nroot]
+            neighbours = {}
+            for offset in offsets:
+                direct = [i + o for i,o in zip([ix, iy, iz], offset)]
+                out = [active and not (0 <= t < m) for active,t,m in zip(active_dims, direct, nmax)]
+                if any(out):
+                    if all(o_out or o == 0 for o_out,o in zip(out, offset)):
+                        kind = 'boundary'
+                    else:
+                        kind = 'partial'
+                    match = [axis for axis in range(3) if out[axis]]
+                elif (l, *direct) in self._hash_map:
+                    kind = 'same'
+                    match = [self._hash_map[(l, *direct)]]
+                elif (l - 1, *[i >> 1 for i in direct]) in self._hash_map:
+                    kind = 'coarse'
+                    match = [self._hash_map[(l - 1, *[i >> 1 for i in direct])]]
+                else:
+                    side = [
+                        ((1,) if o < 0 else (0,) if o > 0 else (0, 1)) if active else (0,)
+                        for active,o in zip(active_dims, offset)
+                    ]
+                    keys = [
+                        (l + 1,
+                         2*direct[0] + ox,
+                         2*direct[1] + oy if active_dims[1] else 0,
+                         2*direct[2] + oz if active_dims[2] else 0)
+                        for ox in side[0] for oy in side[1] for oz in side[2]
+                    ]
+                    kind = 'fine'
+                    match = [self._hash_map.get(key) for key in keys]
+                    if None in match:
+                        raise RuntimeError(f'Invalid mesh refinement at block {n}, offset {offset}')
+                neighbours[offset] = (kind, match)
+            self._neighbours.append(neighbours)
 
     def _fill_gcs(self) -> None:
         nblk = self._bbox.shape[0]
 
         # Reflect boundary, copy, and restrict
         for blockID in range(nblk):
-            for offset,neighbours in self._neighbours[blockID].items():
-                if len(neighbours) == 0:
-                    self._amr_reflect_block(blockID, offset)
-                elif all(self._levels[i] == self._levels[blockID] for i in neighbours):
-                    self._amr_copy_block(blockID, offset, neighbours[0])
-                elif all(self._levels[i] > self._levels[blockID] for i in neighbours):
-                    self._amr_restrict_block(blockID, offset, neighbours)
+            for offset,(kind, match) in self._neighbours[blockID].items():
+                if kind == 'boundary':
+                    self._amr_reflect_block(blockID, offset, mirror_axes=match)
+                elif kind == 'same':
+                    self._amr_copy_block(blockID, offset, match[0])
+                elif kind == 'fine':
+                    self._amr_restrict_block(blockID, offset, match)
 
-        # Prolongation after everything else is done
-        # TODO cache blocks needing prolongation in first loop, so we don't
-        # have to loop over everything again
-        for blockID in range(nblk):
-            for offset,neighbours in self._neighbours[blockID].items():
-                if len(neighbours) > 0 and all(self._levels[i] < self._levels[blockID] for i in neighbours):
-                    self._amr_prolong_block(blockID, offset, neighbours[0])
+        # Prolongation and partial reflection
+        for blockID in np.argsort(self._levels, kind='stable'):
+            items = self._neighbours[blockID].items()
+            for offset,(kind, match) in items:
+                if kind == 'coarse':
+                    self._amr_prolong_block(blockID, offset, match[0])
+            for offset,(kind, match) in items:
+                if kind == 'partial':
+                    self._amr_reflect_block(blockID, offset, mirror_axes=match)
+
+        unfilled = np.where(~np.isfinite(self._unk).all(axis=(0, 2, 3, 4)))[0]
+        if unfilled.size > 0:
+            raise RuntimeError(f'Missed guard cells in {unfilled.size} blocks: {unfilled[:10]}')
 
     def _amr_dest_slice(
         self,
@@ -655,54 +610,40 @@ class FLASHSnapshot(Snapshot):
             istart = n - (ratio - 1)*ng if offset < 0 else ng
             return (istart, istart + ratio*ng)
 
-    def _amr_prolong_slice(
-        self,
-        offset: int,
-        n: int,
-        ng: int,
-        ratio: int,
-        np: int
-    ) -> Tuple[int, int]:
-        if offset == 0:
-            return (
-                max(np*(n // ratio), ng - 1 + np*(n // ratio)),
-                min(n + 2*ng, ng + (np + 1)*(n // ratio) + 1)
-            )
-        else:
-            istart = n + ng - (ng//2) - 1 if offset < 0 else ng - 1
-            iend   = n + ng + 1           if offset < 0 else ng + (ng//2) + 1
-            return (istart, iend)
-
-    def _amr_prolonged_slice(
-        self,
-        offset: int,
-        n: int,
-        ng: int
-    ) -> Tuple[int, int]:
-        if offset == 0:
-            return (1, -1) if ng > 0 else (0, n)
-        else:
-            istart = 1 - (ng & 1) if offset < 0 else 1
-            return (istart, istart + ng)
+    # Boundary types for which the normal velocity component changes sign
+    _ODD_BC = ('reflect', 'reflecting', 'axisymmetric', 'eqtsymmetric')
 
     def _amr_reflect_block(
         self,
         blockID: int,
-        offset: Tuple[int, int, int]
+        offset: Tuple[int, int, int],
+        mirror_axes: List[int]
     ) -> None:
-        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
-        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
-        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
-        jxstart, jxend = ixstart - (offset[0]*self._ngx), ixend - (offset[0]*self._ngx)
-        jystart, jyend = iystart - (offset[1]*self._ngy), iyend - (offset[1]*self._ngy)
-        jzstart, jzend = izstart - (offset[2]*self._ngz), izend - (offset[2]*self._ngz)
-        xo = -1 if offset[0] else 1
-        yo = -1 if offset[1] else 1
-        zo = -1 if offset[2] else 1
+        n  = (self._nxb, self._nyb, self._nzb)
+        ng = (self._ngx, self._ngy, self._ngz)
+        dst, src = [], []
+        for axis in range(3):
+            i0, i1 = self._amr_dest_slice(offset[axis], n[axis], ng[axis])
+            dst.append(slice(i0, i1))
+            if axis in mirror_axes:
+                j0, j1 = i0 - offset[axis]*ng[axis], i1 - offset[axis]*ng[axis]
+                src.append(slice(j1 - 1, j0 - 1 if j0 > 0 else None, -1))
+            else:
+                src.append(slice(i0, i1))
 
-        for ifield in range(len(self._field_list)):
-            self._unk[ifield, blockID, izstart:izend, iystart:iyend, ixstart:ixend] = \
-                    self._unk[ifield, blockID, jzstart:jzend, jystart:jyend, jxstart:jxend][::zo, ::yo, ::xo]
+        # Mirror velocity components
+        sign = {}
+        vel = ('velocity-x', 'velocity-y', 'velocity-z')
+        for axis in mirror_axes:
+            bc = self._bc[axis][0 if offset[axis] < 0 else 1]
+            if bc in self._ODD_BC:
+                sign[vel[axis]] = -sign.get(vel[axis], 1.)
+                if bc == 'axisymmetric' and axis == 0 and self._geometry == 'cylindrical':
+                    sign['velocity-z'] = -sign.get('velocity-z', 1.)
+
+        for ifield,field in enumerate(self._field_list):
+            self._unk[ifield, blockID, dst[2], dst[1], dst[0]] = \
+                sign.get(field, 1.) * self._unk[ifield, blockID, src[2], src[1], src[0]]
 
     def _amr_copy_block(
         self,
@@ -787,64 +728,35 @@ class FLASHSnapshot(Snapshot):
         offset: Tuple[int, int, int],
         neighbourID: int
     ) -> None:
-        dl = self._levels[blockID] - self._levels[neighbourID]
-        ratio = (1 << dl)
+        n  = (self._nxb, self._nyb, self._nzb)
+        ng = (self._ngx, self._ngy, self._ngz)
+        dst = [slice(*self._amr_dest_slice(offset[axis], n[axis], ng[axis])) for axis in range(3)]
+        centres = (self._x[blockID, dst[0]], self._y[blockID, dst[1]], self._z[blockID, dst[2]])
+        spacing = (self._dx[neighbourID], self._dy[neighbourID], self._dz[neighbourID])
+        snap = 2 << int(self._levels[blockID] - self._levels[neighbourID])
 
-        xbmin = self._bbox[blockID, 0, 0]
-        ybmin = self._bbox[blockID, 1, 0]
-        zbmin = self._bbox[blockID, 2, 0]
-        xnmin = self._bbox[neighbourID, 0, 0]
-        ynmin = self._bbox[neighbourID, 1, 0]
-        znmin = self._bbox[neighbourID, 2, 0]
-        dxb = self._dxb[self._levels[blockID]-1]
-        dyb = self._dyb[self._levels[blockID]-1]
-        dzb = self._dzb[self._levels[blockID]-1]
+        idx, wgt = [], []
+        for axis in range(3):
+            if axis < self._dim:
+                s = (centres[axis] - (self._bbox[neighbourID, axis, 0] + 0.5*spacing[axis])) / spacing[axis]
+                s = np.round(s*snap) / snap
+                i0 = np.floor(s).astype(int)
+                idx.append((ng[axis] + i0, ng[axis] + i0 + 1))
+                wgt.append((1. - (s - i0), s - i0))
+            else:
+                zero = np.zeros(len(centres[axis]), dtype=int)
+                idx.append((zero,))
+                wgt.append((np.ones(len(centres[axis])),))
 
-        npx = round(abs(xbmin - xnmin) / dxb)
-        npy = round(abs(ybmin - ynmin) / dyb)
-        npz = round(abs(zbmin - znmin) / dzb)
+        coarse = self._unk[:, neighbourID]
+        result = 0.
+        for cz in range(len(idx[2])):
+            for cy in range(len(idx[1])):
+                for cx in range(len(idx[0])):
+                    w = wgt[2][cz][:, None, None] * wgt[1][cy][None, :, None] * wgt[0][cx][None, None, :]
+                    result = result + w * coarse[:, idx[2][cz][:, None, None], idx[1][cy][None, :, None], idx[0][cx][None, None, :]]
 
-        ixstart, ixend = self._amr_dest_slice(offset[0], self._nxb, self._ngx)
-        iystart, iyend = self._amr_dest_slice(offset[1], self._nyb, self._ngy)
-        izstart, izend = self._amr_dest_slice(offset[2], self._nzb, self._ngz)
-        jxstart, jxend = self._amr_prolong_slice(offset[0], self._nxb, self._ngx, ratio, npx)
-        jystart, jyend = self._amr_prolong_slice(offset[1], self._nyb, self._ngy, ratio, npy)
-        jzstart, jzend = self._amr_prolong_slice(offset[2], self._nzb, self._ngz, ratio, npz)
-        kxstart, kxend = self._amr_prolonged_slice(offset[0], self._nxb, self._ngx)
-        kystart, kyend = self._amr_prolonged_slice(offset[1], self._nyb, self._ngy)
-        kzstart, kzend = self._amr_prolonged_slice(offset[2], self._nzb, self._ngz)
-
-        for ifield in range(len(self._field_list)):
-            src = self._unk[ifield, neighbourID, jzstart:jzend, jystart:jyend, jxstart:jxend]
-            for _ in range(dl):
-                src = self._amr_prolong_axis(src, axis=2)
-                if self._dim >= 2:
-                    src = self._amr_prolong_axis(src, axis=1)
-                if self._dim == 3:
-                    src = self._amr_prolong_axis(src, axis=0)
-
-            self._unk[ifield, blockID, izstart:izend, iystart:iyend, ixstart:ixend] = \
-                src[kzstart:kzend, kystart:kyend, kxstart:kxend]
-
-    def _amr_prolong_axis(self, src: np.ndarray, axis: int) -> np.ndarray:
-        dst_shape = list(src.shape)
-        dst_shape[axis] = 2*(dst_shape[axis] - 1)
-        dst = np.empty(dst_shape, dtype=src.dtype)
-
-        lo = [slice(None) for _ in range(3)]
-        hi = [slice(None) for _ in range(3)]
-        lo[axis] = slice(None, -1)
-        hi[axis] = slice(1,  None)
-
-        even = [slice(None) for _ in range(3)]
-        odd  = [slice(None) for _ in range(3)]
-        even[axis] = slice(0, None, 2)
-        odd[axis]  = slice(1, None, 2)
-
-        dst[tuple(even)] = 0.75*src[tuple(lo)] + 0.25*src[tuple(hi)]
-        dst[tuple(odd)]  = 0.25*src[tuple(lo)] + 0.75*src[tuple(hi)]
-
-        return dst
+        self._unk[:, blockID, dst[2], dst[1], dst[0]] = result
 
     def get_proxy_descriptor(self) -> Dict[str, Any]:
         return self._desc
@@ -870,6 +782,7 @@ class FLASHSnapshot(Snapshot):
             'field_list'  : self._field_list,
             'current_time': self._current_time,
             'dim'         : self._dim,
+            'geometry'    : self._geometry,
             'xmin'        : self._xmin,
             'xmax'        : self._xmax,
             'ymin'        : self._ymin,

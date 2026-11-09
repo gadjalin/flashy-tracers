@@ -1,6 +1,7 @@
 from typing import Dict, List, Tuple, Type, Any, Optional
 import sys
 import queue
+import threading
 import time
 
 import numpy as np
@@ -14,9 +15,17 @@ from .eos import EosProxy
 TQDM_FORMAT = '{desc:<5.5}{percentage:3.0f}%|{bar:20}{r_bar}'
 
 
-def loader_thread(filenames: List[str], load_nu: bool, queue: queue.Queue, SnapshotCls: Snapshot) -> None:
+def loader_thread(
+    filenames: List[str],
+    load_nu: bool,
+    queue: queue.Queue,
+    SnapshotCls: Snapshot,
+    stop_event: Optional[threading.Event] = None
+) -> None:
     with tqdm(total=len(filenames), bar_format=TQDM_FORMAT, file=sys.stdout) as pbar:
         for file in filenames:
+            if stop_event is not None and stop_event.is_set():
+                break
             snap = SnapshotCls(file, use_nu=load_nu)
             queue.put(snap)
             pbar.update()
@@ -68,6 +77,10 @@ def initial_state_process(
     state = None
     try:
         state = save_state(pos, proxy, exports['output_vars'], exports['eos_desc'])
+    except Exception as e:
+        print(f'An error occured for tracer {identifier}: ', e)
+        state = None
+        sys.stdout.flush()
     finally:
         proxy.close()
 
@@ -80,20 +93,24 @@ def integrate_tracer(
     start_pos: np.ndarray,
     exports: Dict[str, Any]
 ) -> Tuple[np.ndarray, np.ndarray]:
-    start_time = time.time()
-    timeout = 20.0
+    start_time = time.process_time()
+    timeout = exports.get('timeout', 20.0)
 
     t0 = start_snap.current_time
     t1 = end_snap.current_time
+    dim = start_snap.dimensionality
 
     def velocity(t: float, pos: List[float]) -> List[float]:
-        if (time.time() - start_time) > timeout:
+        if timeout is not None and (time.process_time() - start_time) > timeout:
             raise RuntimeError('Tracer integration timeout')
 
         v0 = start_snap.get_quantity(('velocity-x', 'velocity-y', 'velocity-z'), *pos)
         v1 = end_snap.get_quantity(('velocity-x', 'velocity-y', 'velocity-z'), *pos)
         # Linearly interpolate velocity
-        return v0 + (v1 - v0) * (t - t0)/(t1 - t0)
+        v = v0 + (v1 - v0) * (t - t0)/(t1 - t0)
+        # Exclude velz rotation in 1D and 2D
+        v[dim:] = 0.0
+        return v
 
     def out_of_bounds(t: float, pos: List[float]) -> float:
         if end_snap.dimensionality == 1:

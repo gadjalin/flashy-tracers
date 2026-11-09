@@ -6,9 +6,13 @@ from .snap.snapshot import Snapshot
 from .eos import EosTable
 
 
+_COLUMNS = ['id', 'x', 'y', 'z', 'mass']
+_FMTS = [' %-22d', ' % .15e', ' % .15e', ' % .15e', ' % .15e']
+_DTYPE = [(c, np.float64) for c in _COLUMNS]
+
+
 def from_file(filename: str) -> np.ndarray:
-    names = ['x', 'y', 'z', 'mass']
-    tracers = np.genfromtxt(filanem, names=names)
+    tracers = np.atleast_1d(np.genfromtxt(filename, names=_COLUMNS))
     if len(tracers) == 0:
         raise RuntimeError(f'No tracers found in file {filename}')
 
@@ -18,7 +22,8 @@ def from_file(filename: str) -> np.ndarray:
 def sample_uniform_space(
     n: int,
     snap: Snapshot,
-    max_dens: Optional[float] = None
+    max_dens: Optional[float] = None,
+    max_rad: Optional[float] = None
 ) -> np.ndarray:
     # Retrieve simulation domain
     grid, fields = snap.get_field(('density', 'temperature'))
@@ -26,63 +31,40 @@ def sample_uniform_space(
     mask = np.ones_like(fields, dtype=bool)
     if max_dens is not None:
         mask &= fields['density'] < max_dens
+    if max_rad is not None:
+        r = np.sqrt(grid['x']**2 + grid['y']**2 + grid['z']**2)
+        mask &= r < max_rad
 
-    # Weigh by cell size to cover uniform area in 2D independent of refinement
     grid = grid[mask]
     fields = fields[mask]
-    cell_size = grid['dx']
-    if snap.dimensionality >= 2:
-        cell_size *= grid['dy']
-    if snap.dimensionality == 3:
-        cell_size *= grid['dz']
 
     print(f'Sampling {n} tracers uniformly in space')
 
-    # Ensure no more than one tracer per cell
-    if n == len(grid):
-        sample = np.full_like(grid, True)
-    elif n < len(grid):
-        # Weigh by cell size/mass to ensure uniform spatial distribution
-        prob = cell_size/np.sum(cell_size)
+    cell_mass = fields['density']*grid['volume']
+    cell_size = grid['dx'].copy()
+    cell_size *= grid['dy'] if snap.dimensionality >= 2 else 1.0
+    cell_size *= grid['dz'] if snap.dimensionality == 3 else 1.0
 
-        # Compute occupation probability for each cell
-        occupation = n*prob
-        filled = occupation >= 1.
-        num_filled = np.sum(filled)
-        if num_filled > 0:
-            while True: # Adjust distribution
-                prob = cell_size[~filled]/np.sum(cell_size[~filled])
-                occupation[filled] = 1.
-                occupation[~filled] = (n-num_filled)*prob
-                new_filled = occupation >= 1.
-                if np.any(~filled & new_filled):
-                    filled |= new_filled
-                    num_filled = np.sum(filled)
-                else:
-                    break
+    print('Total mass: ', np.sum(cell_mass))
 
-            sample = np.random.choice(np.where(~filled)[0], size=(n-num_filled), replace=False, p=prob)
-            sample = np.concatenate((np.where(filled)[0], sample))
-        else:
-            sample = np.random.choice(len(grid), size=n, replace=False, p=prob)
-    else:
-        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(grid)}')
+    occupation, sample = _sample_saturated(n, grid, cell_size)
 
     # Mass of the sampled region
     sample_mass = fields[sample]['density']*grid[sample]['volume']
     sample_total_mass = np.sum(sample_mass)
 
-    dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
-    tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = grid[sample]['x']
-    tracers['y'] = grid[sample]['y']
-    tracers['z'] = grid[sample]['z']
+    #x_jitter, y_jitter, z_jitter = _calculate_jitter(grid, sample)
+
+    tracers = np.empty(len(sample), dtype=_DTYPE)
+    tracers['id'] = list(range(len(sample)))
+    tracers['x'] = grid[sample]['x']# + x_jitter
+    tracers['y'] = grid[sample]['y']# + y_jitter
+    tracers['z'] = grid[sample]['z']# + z_jitter
     tracers['mass'] = sample_mass/occupation[sample]
 
     print('Total sampled mass: ', sample_total_mass)
     print('Total tracers mass: ', np.sum(tracers['mass']))
-    print('Min tracer mass: ', np.min(tracers['mass']))
-    print('Max tracer mass: ', np.max(tracers['mass']))
+    print('Min/Max tracer mass: ', np.min(tracers['mass']), ' / ', np.max(tracers['mass']))
 
     return tracers
 
@@ -90,7 +72,8 @@ def sample_uniform_space(
 def sample_uniform_mass(
     n: int,
     snap: Snapshot,
-    max_dens: Optional[float] = None
+    max_dens: Optional[float] = None,
+    max_rad: Optional[float] = None
 ) -> np.ndarray:
     # Retrieve simulation domain
     grid, fields = snap.get_field(('density', 'temperature'))
@@ -98,6 +81,9 @@ def sample_uniform_mass(
     mask = np.ones_like(fields, dtype=bool)
     if max_dens is not None:
         mask &= fields['density'] < max_dens
+    if max_rad is not None:
+        r = np.sqrt(grid['x']**2 + grid['y']**2 + grid['z']**2)
+        mask &= r < max_rad
 
     grid = grid[mask]
     fields = fields[mask]
@@ -112,15 +98,12 @@ def sample_uniform_mass(
 
     # Jitter particles away from cell centre, in particular those placed in the
     # same cell
-    rng = np.random.default_rng(seed=42)
-    x_jitter = rng.uniform(-grid[sample]['dx']/2., grid[sample]['dx']/2., size=len(sample))
-    y_jitter = rng.uniform(-grid[sample]['dy']/2., grid[sample]['dy']/2., size=len(sample))
-    z_jitter = rng.uniform(-grid[sample]['dz']/2., grid[sample]['dz']/2., size=len(sample))
+    x_jitter, y_jitter, z_jitter = _calculate_jitter(grid, sample)
 
     sample_total_mass = np.sum(fields[sample]['density']*grid[sample]['volume'])
 
-    dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
-    tracers = np.zeros(len(sample), dtype=dtypes)
+    tracers = np.empty(len(sample), dtype=_DTYPE)
+    tracers['id'] = list(range(len(sample)))
     tracers['x'] = grid[sample]['x'] + x_jitter
     tracers['y'] = grid[sample]['y'] + y_jitter
     tracers['z'] = grid[sample]['z'] + z_jitter
@@ -154,7 +137,6 @@ def sample_unbound(
         mask &= fields['temperature'] < max_temp
     mask &= _unbound_mask(grid, fields, eos)
 
-    # Weigh by cell size to cover uniform area in 2D independent of refinement
     grid = grid[mask]
     fields = fields[mask]
 
@@ -167,59 +149,26 @@ def sample_unbound(
 
     print('Total unbound mass: ', np.sum(cell_mass))
 
-    # Ensure no more than one tracer per cell
-    if n == len(grid):
-        sample = np.full_like(grid, True)
-    elif n < len(grid):
-        # Weigh by cell size/mass to ensure uniform spatial distribution
-        prob = cell_size/np.sum(cell_size)
-
-        # Compute occupation probability for each cell
-        occupation = n*prob
-        filled = occupation >= 1.
-        num_filled = np.sum(filled)
-        if num_filled > 0:
-            while True: # Adjust distribution
-                prob = cell_size[~filled]/np.sum(cell_size[~filled])
-                occupation[filled] = 1.
-                occupation[~filled] = (n-num_filled)*prob
-                new_filled = occupation >= 1.
-                if np.any(~filled & new_filled):
-                    filled |= new_filled
-                    num_filled = np.sum(filled)
-                else:
-                    break
-
-            sample = np.random.choice(np.where(~filled)[0], size=(n-num_filled), replace=False, p=prob)
-            sample = np.concatenate((np.where(filled)[0], sample))
-        else:
-            sample = np.random.choice(len(grid), size=n, replace=False, p=prob)
-    else:
-        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(grid)}')
+    occupation, sample = _sample_saturated(n, grid, cell_size)
 
     # Mass of the sampled region
     sample_mass = fields[sample]['density']*grid[sample]['volume']
     sample_total_mass = np.sum(sample_mass)
 
-    # Jitter particles away from cell centre, in particular those placed in the
-    # same cell
-    rng = np.random.default_rng(seed=42)
-    x_jitter = rng.uniform(-grid[sample]['dx']/2., grid[sample]['dx']/2., size=len(sample))
-    y_jitter = rng.uniform(-grid[sample]['dy']/2., grid[sample]['dy']/2., size=len(sample))
-    z_jitter = rng.uniform(-grid[sample]['dz']/2., grid[sample]['dz']/2., size=len(sample))
+    # Jitter particles away from cell centre
+    #x_jitter, y_jitter, z_jitter = _calculate_jitter(grid, sample)
 
     # Calculate each tracer mass and coordinates
-    dtypes = [('x', float), ('y', float), ('z', float), ('mass', float)]
-    tracers = np.zeros(len(sample), dtype=dtypes)
-    tracers['x'] = grid[sample]['x'] + x_jitter
-    tracers['y'] = grid[sample]['y'] + y_jitter
-    tracers['z'] = grid[sample]['z'] + z_jitter
+    tracers = np.empty(len(sample), dtype=_DTYPE)
+    tracers['id'] = list(range(len(sample)))
+    tracers['x'] = grid[sample]['x']# + x_jitter
+    tracers['y'] = grid[sample]['y']# + y_jitter
+    tracers['z'] = grid[sample]['z']# + z_jitter
     tracers['mass'] = sample_mass/occupation[sample]
 
     print('Total sampled mass: ', sample_total_mass)
     print('Total tracers mass: ', np.sum(tracers['mass']))
-    print('Min tracer mass: ', np.min(tracers['mass']))
-    print('Max tracer mass: ', np.max(tracers['mass']))
+    print('Min/Max tracer mass: ', np.min(tracers['mass']), ' / ', np.max(tracers['mass']))
 
     return tracers
 
@@ -229,9 +178,15 @@ def sample_user(
     snap: Snapshot,
     eos: EosTable,
     max_dens: Optional[float],
-    max_temp: Optional[float]
+    max_temp: Optional[float],
+    max_rad: Optional[float]
 ) -> np.ndarray:
     raise NotImplementedError('User placement method not implemented')
+
+
+def save_tracers(file: str, tracers: np.ndarray) -> None:
+    header = ''.join([col.ljust(24) for col in _COLUMNS]).strip()
+    np.savetxt(file, tracers, fmt=_FMTS, header=header)
 
 
 def _unbound_mask(grid: np.ndarray, fields: np.ndarray, eos: EosTable) -> np.ndarray:
@@ -252,4 +207,57 @@ def _unbound_mask(grid: np.ndarray, fields: np.ndarray, eos: EosTable) -> np.nda
     dgrav = xgpot*xrho*vol
     detot = dener + dgrav - coldenergy
     return (detot > 0.0) & (vrad > 0.0)
+
+
+def _sample_saturated(
+    n: int,
+    grid: np.ndarray,
+    cell_size: np.ndarray,
+    rng: Optional[np.random.Generator] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng() if rng is None else rng
+
+    # Ensure no more than one tracer per cell
+    if n == len(grid):
+        occupation = np.ones(len(grid))
+        sample = np.arange(len(grid))
+    elif n < len(grid):
+        # Weigh by cell size/mass to ensure uniform spatial distribution
+        prob = cell_size/np.sum(cell_size)
+
+        # Compute occupation probability for each cell
+        occupation = n*prob
+        filled = occupation >= 1.
+        num_filled = np.sum(filled)
+        if num_filled > 0:
+            while True: # Adjust distribution
+                prob = cell_size[~filled]/np.sum(cell_size[~filled])
+                occupation[filled] = 1.
+                occupation[~filled] = (n-num_filled)*prob
+                new_filled = occupation >= 1.
+                if np.any(~filled & new_filled):
+                    filled |= new_filled
+                    num_filled = np.sum(filled)
+                else:
+                    break
+
+        order = rng.permutation(len(grid))
+        cumulative = np.cumsum(occupation[order])
+        cumulative[-1] = n # absorb round-off so that the last point always lands
+        sample = order[np.searchsorted(cumulative, rng.random() + np.arange(n), side='right')]
+
+        if len(np.unique(sample)) != n:
+            raise RuntimeError('Systematic sampling selected a cell twice')
+    else:
+        raise ValueError(f'Requesting more tracers than available cells: {n}/{len(grid)}')
+
+    return occupation, sample
+
+
+def _calculate_jitter(grid, sample):
+    rng = np.random.default_rng(seed=42)
+    x = rng.uniform(-grid[sample]['dx']/2., grid[sample]['dx']/2., size=len(sample))
+    y = rng.uniform(-grid[sample]['dy']/2., grid[sample]['dy']/2., size=len(sample))
+    z = rng.uniform(-grid[sample]['dz']/2., grid[sample]['dz']/2., size=len(sample))
+    return x, y, z
 

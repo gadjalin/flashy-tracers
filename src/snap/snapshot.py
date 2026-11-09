@@ -37,6 +37,7 @@ SNAP_FIELD_MAP = {k: v for v,k in enumerate(SNAP_FIELDS + SNAP_FIELDS_NU)}
 class SnapshotProxy(ABC):
     _field_list: List[str]
     _current_time: float
+    _geometry: str
     _dim: int
 
     _xmin: float
@@ -77,6 +78,10 @@ class SnapshotProxy(ABC):
     @property
     def dimensionality(self) -> int:
         return self._dim
+
+    @property
+    def geometry(self) -> str:
+        return self._geometry
 
     @property
     def xmin(self) -> float:

@@ -53,7 +53,7 @@ class StateBuffer(object):
         n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in range(self._len)]
         header = [f'{var} [{_UNITS[var]}]' if _UNITS[var] is not None else f'{var}' for var in self._vars]
-        header = '# ' + '        '.join(header) + '\n'
+        header = '# ' + ''.join([name.ljust(24) for name in header]).strip() + '\n'
 
         def init_tracer_file(file: str, header: str) -> None:
             with open(file, 'w') as f:
@@ -81,7 +81,7 @@ class StateBuffer(object):
         def append_tracer_file(file: str, data: np.ndarray) -> None:
             if len(data) > 0:
                 with open(file, 'a') as f:
-                    np.savetxt(f, data)
+                    np.savetxt(f, data, fmt=' % .15e')
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = [pool.submit(append_tracer_file, file, state) for file,state in zip(tracer_files, self._states)]
@@ -106,12 +106,14 @@ class StateBuffer(object):
     def reverse_output(self) -> None:
         n_digits = int(np.log10(max(self._len - 1, 1))) + 1
         tracer_files = [os.path.join(self._output_dir, 'tracer' + f'{i}'.zfill(n_digits) + '.dat') for i in range(self._len)]
-        header = [f'{var} [{_UNITS[var]}]' if _UNITS[var] is not None else f'{var}' for var in self._vars]
-        header = '        '.join(header)
+        names = [f'{var} [{_UNITS[var]}]' if _UNITS[var] is not None else f'{var}' for var in self._vars]
+        header = ''.join([name.ljust(24) for name in names]).strip()
 
         def reverse_tracer_file(file: str, header: str) -> None:
-            history = np.genfromtxt(file)
-            np.savetxt(file, history[::-1], header=header)
+            history = np.atleast_2d(np.genfromtxt(file))
+            if history.size == 0:
+                return
+            np.savetxt(file, history[::-1], fmt=' % .15e', header=header)
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = [pool.submit(reverse_tracer_file, file, header) for file in tracer_files]
